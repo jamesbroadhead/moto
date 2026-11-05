@@ -1020,7 +1020,33 @@ class LambdaFunction(CloudFormationModel, DockerModel):
         except Exception:
             return s
 
+    def _invoke_external(
+        self, event: Any, invocation_type: str = "RequestResponse"
+    ) -> tuple[str, bool, str]:
+        """Sends the invocation to the Lambda Invoke API at MOTO_LAMBDA_INVOKE_ENDPOINT."""
+        import requests
+
+        url = f"{settings.lambda_invoke_endpoint()}/2015-03-31/functions/{self.function_arn}/invocations"
+        data = event if isinstance(event, (str, bytes)) else json.dumps(event)
+        headers = {"X-Amz-Invocation-Type": "RequestResponse", "X-Amz-Log-Type": "Tail"}
+
+        def call() -> tuple[str, bool, str]:
+            resp = requests.post(url, data=data, headers=headers, timeout=float(self.timeout) + 30)
+            logs = resp.headers.get("X-Amz-Log-Result", "")
+            logs = base64.b64decode(logs).decode("utf-8") if logs else ""
+            errored = bool(resp.headers.get("X-Amz-Function-Error")) or resp.status_code >= 300
+            return resp.text, errored, logs
+
+        if invocation_type == "Event":
+            # Asynchronous: the caller does not wait for the function
+            threading.Thread(target=call, daemon=True).start()
+            return "", False, ""
+        return call()
+
     def _invoke_lambda(self, event: str | None = None) -> tuple[str, bool, str]:
+        if settings.lambda_invoke_endpoint():
+            return self._invoke_external(event if event is not None else {})
+
         import docker.errors
 
         # Create the LogGroup if necessary, to write the result to
@@ -1191,7 +1217,12 @@ class LambdaFunction(CloudFormationModel, DockerModel):
             body = "{}"
 
         # Get the invocation type:
-        res, errored, logs = self._invoke_lambda(event=body)
+        if settings.lambda_invoke_endpoint():
+            res, errored, logs = self._invoke_external(
+                body, request_headers.get("x-amz-invocation-type", "RequestResponse")
+            )
+        else:
+            res, errored, logs = self._invoke_lambda(event=body)
         if errored:
             response_headers["x-amz-function-error"] = "Handled"
 

@@ -170,6 +170,10 @@ class Rule(CloudFormationModel):
             elif arn.service == "sqs":
                 group_id = target.get("SqsParameters", {}).get("MessageGroupId")
                 self._send_to_sqs_queue(arn.resource_id, event, group_id)
+            elif arn.service == "lambda":
+                self._send_to_lambda(target["Arn"], event)
+            elif arn.service == "sns":
+                self._send_to_sns_topic(target["Arn"], event)
             elif arn.service == "events" and arn.resource_type == "event-bus":
                 cross_account_backend: EventsBackend = events_backends[arn.account][
                     arn.region
@@ -200,6 +204,28 @@ class Rule(CloudFormationModel):
                     )
             else:
                 raise NotImplementedError(f"Expr not defined for {type(self)}")
+
+    def _send_to_lambda(self, function_arn: str, event: dict[str, Any]) -> None:
+        from moto.awslambda.utils import get_backend
+
+        if "time" in event:
+            event["time"] = iso_8601_datetime_without_milliseconds(
+                utcfromtimestamp(event["time"])
+            )
+        fn = get_backend(self.account_id, self.region_name).get_function(function_arn)
+        # EventBridge invokes Lambda targets asynchronously
+        fn.invoke(json.dumps(event), {"x-amz-invocation-type": "Event"}, {})
+
+    def _send_to_sns_topic(self, topic_arn: str, event: dict[str, Any]) -> None:
+        from moto.sns import sns_backends
+
+        if "time" in event:
+            event["time"] = iso_8601_datetime_without_milliseconds(
+                utcfromtimestamp(event["time"])
+            )
+        sns_backends[self.account_id][self.region_name].publish(
+            message=json.dumps(event), arn=topic_arn
+        )
 
     def _send_to_cw_log_group(self, name: str, event: dict[str, Any]) -> None:
         from moto.logs import logs_backends
