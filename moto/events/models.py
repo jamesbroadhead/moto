@@ -293,7 +293,9 @@ class Rule(CloudFormationModel):
         properties = cloudformation_json["Properties"]
         properties.setdefault("EventBusName", "default")
 
-        if "EventPattern" in properties:
+        if "EventPattern" in properties and not isinstance(
+            properties["EventPattern"], str
+        ):
             properties["EventPattern"] = json.dumps(properties["EventPattern"])
 
         event_name = resource_name
@@ -411,6 +413,11 @@ class EventBus(CloudFormationModel):
             }
             return json.dumps(policy)
         return None
+
+    @property
+    def physical_resource_id(self) -> str:
+        # Ref returns the name of the event bus
+        return self.name
 
     def has_permissions(self) -> bool:
         return len(self._statements) > 0

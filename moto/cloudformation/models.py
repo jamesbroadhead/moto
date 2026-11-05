@@ -619,6 +619,16 @@ class Stack(CloudFormationModel):
     def has_cfn_attr(cls, attr: str) -> bool:
         return True
 
+    def get_cfn_attribute(self, attribute_name: str) -> Any:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name.startswith("Outputs."):
+            key = attribute_name[len("Outputs.") :]
+            for output in self.output_map.values():
+                if output and output.key == key:
+                    return output.value
+        raise UnformattedGetAttTemplateException()
+
     @property
     def physical_resource_id(self) -> str:
         return self.name

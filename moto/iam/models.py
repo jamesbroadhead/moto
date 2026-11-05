@@ -433,7 +433,9 @@ class ManagedPolicy(Policy, CloudFormationModel):
         **kwargs: Any,
     ) -> ManagedPolicy:
         properties = cloudformation_json.get("Properties", {})
-        policy_document = json.dumps(properties.get("PolicyDocument"))
+        policy_document = properties.get("PolicyDocument")
+        if not isinstance(policy_document, str):
+            policy_document = json.dumps(policy_document)
         name = properties.get("ManagedPolicyName", resource_name)
         description = properties.get("Description")
         path = properties.get("Path")

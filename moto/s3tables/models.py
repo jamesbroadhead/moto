@@ -3,9 +3,10 @@
 import datetime
 import re
 from hashlib import md5
-from typing import Literal
+from typing import Any, Literal
 
 from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import CloudFormationModel
 from moto.moto_api._internal import mock_random as random
 from moto.s3.models import FakeBucket
 from moto.s3tables.exceptions import (
@@ -157,7 +158,7 @@ class Namespace:
         self.tables: dict[str, Table] = {}
 
 
-class FakeTableBucket:
+class FakeTableBucket(CloudFormationModel):
     def __init__(self, name: str, account_id: str, region_name: str):
         self.name = name
         self.account_id = account_id
@@ -169,6 +170,44 @@ class FakeTableBucket:
     @property
     def arn(self) -> str:
         return f"arn:{self.partition}:s3tables:{self.region_name}:{self.account_id}:bucket/{self.name}"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::S3Tables::TableBucket"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "TableBucketName"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "FakeTableBucket":
+        props = cloudformation_json.get("Properties", {})
+        return s3tables_backends[account_id][region_name].create_table_bucket(
+            props.get("TableBucketName", resource_name)
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        # Ref returns the ARN of the table bucket
+        return self.arn
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["TableBucketARN"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "TableBucketARN":
+            return self.arn
+        raise UnformattedGetAttTemplateException()
 
 
 class S3TablesBackend(BaseBackend):
@@ -419,5 +458,34 @@ class S3TablesBackend(BaseBackend):
 s3tables_backends = BackendDict(
     S3TablesBackend,
     "s3tables",
-    additional_regions=["us-east-1", "us-east-2", "us-west-2"],
+    additional_regions=[
+        "af-south-1",
+        "ap-east-1",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-south-1",
+        "ap-south-2",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-3",
+        "ap-southeast-4",
+        "ca-central-1",
+        "eu-central-1",
+        "eu-central-2",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "il-central-1",
+        "me-central-1",
+        "me-south-1",
+        "sa-east-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+    ],
 )

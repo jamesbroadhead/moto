@@ -22,6 +22,7 @@ from typing import (
 # doesn't exist yet, and __subclasses__ won't find it.
 # So we import here to populate the list of subclasses.
 from moto.apigateway import models as apigw_models  # noqa
+from moto.apigatewayv2 import models as apigwv2_models  # noqa
 from moto.autoscaling import models as as_models  # noqa
 from moto.awslambda import models as lambda_models  # noqa
 from moto.batch import models as batch_models  # noqa
@@ -47,6 +48,7 @@ from moto.rds import models as rds_models  # noqa
 from moto.redshift import models as redshift_models  # noqa
 from moto.route53 import models as route53_models  # noqa
 from moto.s3 import models as s3_models  # noqa
+from moto.s3tables import models as s3tables_models  # noqa
 from moto.s3.models import s3_backends
 from moto.s3.utils import bucket_and_name_from_url
 from moto.sagemaker import models as sagemaker_models  # noqa
@@ -205,7 +207,7 @@ def clean_json(resource_json: Any, resources_map: "ResourceMap") -> Any:
                         {
                             "Fn::GetAtt": re.findall(r'(?<=\${)[^"]*?(?=})', sub)[
                                 0
-                            ].split(".")
+                            ].split(".", 1)
                         },
                         resources_map,
                     )
@@ -264,7 +266,13 @@ def clean_json(resource_json: Any, resources_map: "ResourceMap") -> Any:
             cleaned_json[key] = cleaned_val
         return cleaned_json
     elif isinstance(resource_json, list):
-        return [clean_json(val, resources_map) for val in resource_json]
+        cleaned_list = [clean_json(val, resources_map) for val in resource_json]
+        # AWS::NoValue removes the element, e.g. `!If [cond, item, !Ref AWS::NoValue]` in a list
+        return [
+            val
+            for val, original in zip(cleaned_list, resource_json)
+            if val is not None or original is None
+        ]
     else:
         return resource_json
 
@@ -729,7 +737,8 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
                 resource_type = resource["Type"]  # type: ignore[index]
                 attr = value["Fn::GetAtt"][1]
                 resource_class = resource_class_from_type(resource_type)
-                if not resource_class.has_cfn_attr(attr):
+                # Unsupported types are skipped when the stack is created, so their attributes cannot be validated
+                if resource_class is not None and not resource_class.has_cfn_attr(attr):
                     # AWS::SQS::Queue --> Queue
                     short_type = resource_type[resource_type.rindex(":") + 1 :]
                     raise UnsupportedAttribute(resource=short_type, attr=attr)

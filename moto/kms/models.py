@@ -324,7 +324,12 @@ class Key(CloudFormationModel):
             key_usage="ENCRYPT_DECRYPT",
             key_spec="SYMMETRIC_DEFAULT",
             description=properties.get("Description"),
-            tags=properties.get("Tags", []),
+            tags=[
+                {"TagKey": t["Key"], "TagValue": t["Value"]}
+                if "Key" in t
+                else t
+                for t in properties.get("Tags", [])
+            ],
         )
         key.key_rotation_status = properties.get("EnableKeyRotation", False)
         key.enabled = properties.get("Enabled", True)
@@ -333,13 +338,15 @@ class Key(CloudFormationModel):
 
     @classmethod
     def has_cfn_attr(cls, attr: str) -> bool:
-        return attr in ["Arn"]
+        return attr in ["Arn", "KeyId"]
 
     def get_cfn_attribute(self, attribute_name: str) -> str:
         from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
 
         if attribute_name == "Arn":
             return self.arn
+        if attribute_name == "KeyId":
+            return self.id
         raise UnformattedGetAttTemplateException()
 
 

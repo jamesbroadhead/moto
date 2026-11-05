@@ -552,7 +552,7 @@ class LayerVersion(CloudFormationModel):
         return layer_version
 
 
-class LambdaAlias(BaseModel):
+class LambdaAlias(CloudFormationModel):
     def __init__(
         self,
         account_id: str,
@@ -582,6 +582,48 @@ class LambdaAlias(BaseModel):
             self.function_version = function_version
         if routing_config is not None:
             self.routing_config = routing_config
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-alias.html
+        return "AWS::Lambda::Alias"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "LambdaAlias":
+        properties = cloudformation_json["Properties"]
+        return get_backend(account_id, region_name).create_alias(
+            name=properties.get("Name", resource_name),
+            function_name=properties["FunctionName"],
+            function_version=str(properties["FunctionVersion"]),
+            description=properties.get("Description", ""),
+            routing_config=properties.get("RoutingConfig"),  # type: ignore[arg-type]
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.arn
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["AliasArn"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "AliasArn":
+            return self.arn
+        raise UnformattedGetAttTemplateException()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -1390,7 +1432,8 @@ class EventSourceMapping(CloudFormationModel):
 
         if new_batch_size is None:
             self._batch_size = batch_size_for_source[0]
-        elif new_batch_size > batch_size_for_source[1]:
+        # CloudFormation passes parameter values as strings
+        elif int(new_batch_size) > batch_size_for_source[1]:
             error_message = f"BatchSize {new_batch_size} exceeds the max of {batch_size_for_source[1]}"
             raise ValueError("InvalidParameterValueException", error_message)
         else:
@@ -1496,6 +1539,29 @@ class EventSourceMapping(CloudFormationModel):
 class LambdaVersion(CloudFormationModel):
     def __init__(self, spec: dict[str, Any]):
         self.version = spec["Version"]
+        self.function_arn = spec.get("FunctionArn")
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self._versioned_arn()
+
+    def _versioned_arn(self) -> str:
+        arn = str(self.function_arn)
+        suffix = f":{self.version}"
+        return arn if arn.endswith(suffix) else arn + suffix
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["Version", "FunctionArn"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "Version":
+            return str(self.version)
+        if attribute_name == "FunctionArn":
+            return self._versioned_arn()
+        raise UnformattedGetAttTemplateException()
 
     def __repr__(self) -> str:
         return str(self.logical_resource_id)  # type: ignore[attr-defined]
@@ -1517,7 +1583,7 @@ class LambdaVersion(CloudFormationModel):
         properties = cloudformation_json["Properties"]
         function_name = properties["FunctionName"]
         func = get_backend(account_id, region_name).publish_version(function_name)
-        spec = {"Version": func.version}  # type: ignore[union-attr]
+        spec = {"Version": func.version, "FunctionArn": func.function_arn}  # type: ignore[union-attr]
         return LambdaVersion(spec)
 
 

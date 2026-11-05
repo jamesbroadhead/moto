@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel
+from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.utils import iso_8601_datetime_without_milliseconds
 from moto.moto_api._internal import mock_random as random
 from moto.utilities.tagging_service import TaggingService
@@ -31,7 +31,7 @@ from .exceptions import (
 )
 
 
-class Stage(BaseModel):
+class Stage(CloudFormationModel):
     def __init__(self, api: "Api", config: dict[str, Any]):
         self.config = config
         self.name = config["stageName"]
@@ -57,6 +57,36 @@ class Stage(BaseModel):
         self.tags = config.get("tags", {})
         self.created = self.updated = datetime.now()
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::Stage"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "StageName"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Stage":
+        props = cloudformation_json.get("Properties", {})
+        config = _camel_keys({k: v for k, v in props.items() if k not in ("ApiId", "StageVariables", "Tags")})
+        config["stageName"] = props.get("StageName", resource_name)
+        config["stageVariables"] = props.get("StageVariables") or {}
+        config["tags"] = props.get("Tags") or {}
+        return apigatewayv2_backends[account_id][region_name].create_stage(
+            props["ApiId"], config
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
     def to_json(self) -> dict[str, Any]:
         dct = {
             "stageName": self.name,
@@ -78,7 +108,7 @@ class Stage(BaseModel):
         return dct
 
 
-class Authorizer(BaseModel):
+class Authorizer(CloudFormationModel):
     def __init__(
         self,
         auth_creds_arn: str,
@@ -138,6 +168,54 @@ class Authorizer(BaseModel):
         if name is not None:
             self.name = name
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::Authorizer"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Authorizer":
+        props = cloudformation_json.get("Properties", {})
+        jwt = props.get("JwtConfiguration")
+        return apigatewayv2_backends[account_id][region_name].create_authorizer(
+            api_id=props["ApiId"],
+            auth_creds_arn=props.get("AuthorizerCredentialsArn"),  # type: ignore[arg-type]
+            auth_payload_format_version=props.get("AuthorizerPayloadFormatVersion"),  # type: ignore[arg-type]
+            auth_result_ttl=props.get("AuthorizerResultTtlInSeconds"),  # type: ignore[arg-type]
+            authorizer_uri=props.get("AuthorizerUri"),  # type: ignore[arg-type]
+            authorizer_type=props["AuthorizerType"],
+            enable_simple_response=props.get("EnableSimpleResponses"),  # type: ignore[arg-type]
+            identity_source=props.get("IdentitySource"),  # type: ignore[arg-type]
+            identity_validation_expr=props.get("IdentityValidationExpression"),  # type: ignore[arg-type]
+            jwt_config=_camel_keys(jwt) if jwt else None,  # type: ignore[arg-type]
+            name=props.get("Name", resource_name),
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.id
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["AuthorizerId"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "AuthorizerId":
+            return self.id
+        raise UnformattedGetAttTemplateException()
+
     def to_json(self) -> dict[str, Any]:
         return {
             "authorizerId": self.id,
@@ -154,7 +232,7 @@ class Authorizer(BaseModel):
         }
 
 
-class Integration(BaseModel):
+class Integration(CloudFormationModel):
     def __init__(
         self,
         connection_id: str | None,
@@ -324,6 +402,57 @@ class Integration(BaseModel):
         if tls_config is not None:
             self.tls_config = tls_config
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::Integration"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Integration":
+        props = cloudformation_json.get("Properties", {})
+        tls = props.get("TlsConfig")
+        return apigatewayv2_backends[account_id][region_name].create_integration(
+            api_id=props["ApiId"],
+            connection_id=props.get("ConnectionId"),  # type: ignore[arg-type]
+            connection_type=props.get("ConnectionType"),  # type: ignore[arg-type]
+            content_handling_strategy=props.get("ContentHandlingStrategy"),  # type: ignore[arg-type]
+            credentials_arn=props.get("CredentialsArn"),  # type: ignore[arg-type]
+            description=props.get("Description"),  # type: ignore[arg-type]
+            integration_method=props.get("IntegrationMethod"),  # type: ignore[arg-type]
+            integration_subtype=props.get("IntegrationSubtype"),  # type: ignore[arg-type]
+            integration_type=props["IntegrationType"],
+            integration_uri=props.get("IntegrationUri"),  # type: ignore[arg-type]
+            passthrough_behavior=props.get("PassthroughBehavior"),  # type: ignore[arg-type]
+            payload_format_version=props.get("PayloadFormatVersion"),  # type: ignore[arg-type]
+            request_parameters=props.get("RequestParameters"),
+            request_templates=props.get("RequestTemplates"),
+            response_parameters=props.get("ResponseParameters"),
+            template_selection_expression=props.get("TemplateSelectionExpression"),  # type: ignore[arg-type]
+            timeout_in_millis=props.get("TimeoutInMillis"),  # type: ignore[arg-type]
+            tls_config=_camel_keys(tls) if tls else None,  # type: ignore[arg-type]
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.id
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["IntegrationId"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "IntegrationId":
+            return self.id
+        raise UnformattedGetAttTemplateException()
+
     def to_json(self) -> dict[str, Any]:
         return {
             "connectionId": self.connection_id,
@@ -445,7 +574,7 @@ class RouteResponse(BaseModel):
         }
 
 
-class Route(BaseModel):
+class Route(CloudFormationModel):
     def __init__(
         self,
         api_key_required: bool,
@@ -539,6 +668,57 @@ class Route(BaseModel):
         if target:
             self.target = target
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::Route"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Route":
+        props = cloudformation_json.get("Properties", {})
+        request_parameters = props.get("RequestParameters")
+        if request_parameters:
+            request_parameters = {
+                k: _camel_keys(v) for k, v in request_parameters.items()
+            }
+        return apigatewayv2_backends[account_id][region_name].create_route(
+            api_id=props["ApiId"],
+            api_key_required=props.get("ApiKeyRequired", False),
+            authorization_scopes=props.get("AuthorizationScopes"),  # type: ignore[arg-type]
+            authorization_type=props.get("AuthorizationType"),  # type: ignore[arg-type]
+            authorizer_id=props.get("AuthorizerId"),  # type: ignore[arg-type]
+            model_selection_expression=props.get("ModelSelectionExpression"),  # type: ignore[arg-type]
+            operation_name=props.get("OperationName"),  # type: ignore[arg-type]
+            request_models=props.get("RequestModels"),
+            request_parameters=request_parameters,
+            route_key=props["RouteKey"],
+            route_response_selection_expression=props.get(
+                "RouteResponseSelectionExpression"
+            ),  # type: ignore[arg-type]
+            target=props.get("Target"),  # type: ignore[arg-type]
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.route_id
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["RouteId"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "RouteId":
+            return self.route_id
+        raise UnformattedGetAttTemplateException()
+
     def to_json(self) -> dict[str, Any]:
         return {
             "apiKeyRequired": self.api_key_required,
@@ -556,7 +736,7 @@ class Route(BaseModel):
         }
 
 
-class Api(BaseModel):
+class Api(CloudFormationModel):
     def __init__(
         self,
         region: str,
@@ -1032,6 +1212,55 @@ class Api(BaseModel):
     def delete_stage(self, stage_name: str) -> None:
         self.stages.pop(stage_name, None)
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::Api"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Api":
+        props = cloudformation_json.get("Properties", {})
+        cors = props.get("CorsConfiguration")
+        return apigatewayv2_backends[account_id][region_name].create_api(
+            api_key_selection_expression=props.get("ApiKeySelectionExpression"),  # type: ignore[arg-type]
+            cors_configuration=_camel_keys(cors) if cors else None,  # type: ignore[arg-type]
+            description=props.get("Description"),  # type: ignore[arg-type]
+            disable_schema_validation=props.get("DisableSchemaValidation"),  # type: ignore[arg-type]
+            disable_execute_api_endpoint=props.get("DisableExecuteApiEndpoint"),  # type: ignore[arg-type]
+            name=props.get("Name", resource_name),
+            protocol_type=props.get("ProtocolType", "HTTP"),
+            route_selection_expression=props.get("RouteSelectionExpression"),  # type: ignore[arg-type]
+            tags=props.get("Tags") or {},
+            version=props.get("Version"),  # type: ignore[arg-type]
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.api_id
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["ApiId", "ApiEndpoint"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "ApiId":
+            return self.api_id
+        if attribute_name == "ApiEndpoint":
+            return self.api_endpoint
+        raise UnformattedGetAttTemplateException()
+
     def to_json(self) -> dict[str, Any]:
         return {
             "apiId": self.api_id,
@@ -1085,7 +1314,7 @@ class VpcLink(BaseModel):
         }
 
 
-class DomainName(BaseModel):
+class DomainName(CloudFormationModel):
     def __init__(
         self,
         domain_name: str,
@@ -1101,6 +1330,53 @@ class DomainName(BaseModel):
         self.tags = tags
         self.domain_name_arn = f"arn:{get_partition(backend.region_name)}:apigateway:{backend.region_name}::/domainnames/{domain_name}"
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::DomainName"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "DomainName"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "DomainName":
+        props = cloudformation_json.get("Properties", {})
+        mtls = props.get("MutualTlsAuthentication")
+        return apigatewayv2_backends[account_id][region_name].create_domain_name(
+            domain_name=props.get("DomainName", resource_name),
+            domain_name_configurations=_camel_keys(
+                props.get("DomainNameConfigurations", [])
+            ),
+            mutual_tls_authentication=_camel_keys(mtls) if mtls else None,  # type: ignore[arg-type]
+            tags=props.get("Tags") or {},
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.domain_name
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["RegionalDomainName", "RegionalHostedZoneId", "DomainNameArn"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "RegionalDomainName":
+            return f"d-{hashlib.md5(self.domain_name.encode()).hexdigest()[:10]}.execute-api.amazonaws.com"
+        if attribute_name == "RegionalHostedZoneId":
+            return "Z2FDTNDATAQYW2"
+        if attribute_name == "DomainNameArn":
+            return self.domain_name_arn
+        raise UnformattedGetAttTemplateException()
+
     def to_json(self) -> dict[str, Any]:
         return {
             "apiMappingSelectionExpression": self.api_mapping_selection_expression,
@@ -1112,7 +1388,7 @@ class DomainName(BaseModel):
         }
 
 
-class ApiMapping(BaseModel):
+class ApiMapping(CloudFormationModel):
     def __init__(
         self,
         api_id: str,
@@ -1126,6 +1402,31 @@ class ApiMapping(BaseModel):
         self.api_mapping_id = api_mapping_id
         self.domain_name = domain_name
         self.stage = stage
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::ApiGatewayV2::ApiMapping"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "ApiMapping":
+        props = cloudformation_json.get("Properties", {})
+        return apigatewayv2_backends[account_id][region_name].create_api_mapping(
+            api_id=props["ApiId"],
+            api_mapping_key=props.get("ApiMappingKey", ""),
+            domain_name=props["DomainName"],
+            stage=props["Stage"],
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.api_mapping_id
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -1792,3 +2093,12 @@ class ApiGatewayV2Backend(BaseBackend):
 
 
 apigatewayv2_backends = BackendDict(ApiGatewayV2Backend, "apigatewayv2")
+
+
+def _camel_keys(value: Any) -> Any:
+    """CloudFormation properties are PascalCase, the API's are camelCase."""
+    if isinstance(value, dict):
+        return {k[:1].lower() + k[1:]: _camel_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_camel_keys(v) for v in value]
+    return value
