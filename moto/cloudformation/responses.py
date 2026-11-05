@@ -466,6 +466,14 @@ class CloudFormationResponse(BaseResponse):
         self.cloudformation_backend.delete_stack(name_or_stack_id)
         return EmptyResult()
 
+    def describe_account_limits(self) -> ActionResult:
+        # The default quotas of a new account
+        limits = [
+            {"Name": "StackLimit", "Value": 2000},
+            {"Name": "StackOutputsLimit", "Value": 200},
+        ]
+        return ActionResult({"AccountLimits": limits})
+
     def list_exports(self) -> ActionResult:
         token = self._get_param("NextToken")
         exports, next_token = self.cloudformation_backend.list_exports(tokenstr=token)

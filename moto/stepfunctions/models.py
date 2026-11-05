@@ -241,17 +241,23 @@ class StateMachine(StateMachineInstance, CloudFormationModel):
     @classmethod
     def has_cfn_attr(cls, attr: str) -> bool:
         return attr in [
+            "Arn",
             "Name",
             "DefinitionString",
             "RoleArn",
             "StateMachineName",
+            "StateMachineRevisionId",
             "Tags",
         ]
 
     def get_cfn_attribute(self, attribute_name: str) -> Any:
         from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
 
-        if attribute_name == "Name":
+        if attribute_name == "Arn":
+            return self.arn
+        elif attribute_name == "StateMachineRevisionId":
+            return getattr(self, "revision_id", None)
+        elif attribute_name == "Name":
             return self.name
         elif attribute_name == "DefinitionString":
             return self.definition

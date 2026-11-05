@@ -636,7 +636,7 @@ class Queue(CloudFormationModel):
 
     @classmethod
     def has_cfn_attr(cls, attr: str) -> bool:
-        return attr in ["Arn", "QueueName"]
+        return attr in ["Arn", "QueueName", "QueueUrl"]
 
     def get_cfn_attribute(self, attribute_name: str) -> str:
         from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
@@ -645,6 +645,8 @@ class Queue(CloudFormationModel):
             return self.queue_arn
         elif attribute_name == "QueueName":
             return self.name
+        elif attribute_name == "QueueUrl":
+            return self.physical_resource_id
         raise UnformattedGetAttTemplateException()
 
     @property

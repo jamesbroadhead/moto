@@ -141,7 +141,10 @@ def clean_json(resource_json: Any, resources_map: "ResourceMap") -> Any:
         if "Fn::FindInMap" in resource_json:
             map_name = resource_json["Fn::FindInMap"][0]
             map_path = resource_json["Fn::FindInMap"][1:]
-            result = resources_map[map_name]
+            mappings = getattr(resources_map, "mappings", {})
+            result = (
+                mappings[map_name] if map_name in mappings else resources_map[map_name]
+            )
             for path in map_path:
                 if "Fn::Transform" in result:  # type: ignore[operator]
                     result = resources_map[clean_json(path, resources_map)]
@@ -458,12 +461,24 @@ def parse_condition(  # type: ignore[return]
         return condition
 
     condition_operator = list(condition.keys())[0]
+    if condition_operator == "Condition":
+        # A condition that is another condition, e.g. `EnableAlarms: !Condition HasAlertTopicArn`
+        return condition_map[condition["Condition"]]
 
     condition_values = []
     for value in list(condition.values())[0]:
         # Check if we are referencing another Condition
         if isinstance(value, dict) and "Condition" in value:
             condition_values.append(condition_map[value["Condition"]])
+        elif (
+            isinstance(value, dict)
+            and len(value) == 1
+            and list(value)[0] in ("Fn::Equals", "Fn::And", "Fn::Or", "Fn::Not")
+        ):
+            # A nested condition function, e.g. Fn::Or [Fn::Not [Condition: X], ...]
+            condition_values.append(
+                parse_condition(value, resources_map, condition_map)
+            )
         else:
             condition_values.append(clean_json(value, resources_map))
 
@@ -552,6 +567,8 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
         self.cross_stack_resources = cross_stack_resources
         self.stack_id = stack_id
 
+        # Mappings have their own namespace: a parameter may have the same name
+        self.mappings: dict[str, Any] = {}
         # Create the default resources
         self._parsed_resources: dict[str, Any] = {
             "AWS::AccountId": account_id,
@@ -573,13 +590,19 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
 
             if not resource_json:
                 raise KeyError(resource_logical_id)
-            new_resource = parse_and_create_resource(
-                resource_logical_id,
-                resource_json,
-                self,
-                account_id=self._account_id,
-                region_name=self._region_name,
-            )
+            try:
+                new_resource = parse_and_create_resource(
+                    resource_logical_id,
+                    resource_json,
+                    self,
+                    account_id=self._account_id,
+                    region_name=self._region_name,
+                )
+            except KeyError as e:
+                # A KeyError here would read as "resource does not exist" to Mapping.get
+                raise ValidationError(
+                    message=f"Template error: could not create resource {resource_logical_id}: missing {e}"
+                ) from e
             if new_resource is not None:
                 self._parsed_resources[resource_logical_id] = new_resource
             return new_resource
@@ -623,6 +646,7 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
         return self._resource_json_map.keys()
 
     def load_mapping(self) -> None:
+        self.mappings.update(self._template.get("Mappings", {}))
         self._parsed_resources.update(self._template.get("Mappings", {}))
 
     def transform_mapping(self) -> None:
@@ -636,6 +660,7 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
                     partition = get_partition(self._region_name)
                     backend = s3_backends[self._account_id][partition]
                     key = backend.get_object(bucket_name, name)  # type: ignore[arg-type]
+                    self.mappings.update(json.loads(key.value))  # type: ignore[union-attr]
                     self._parsed_resources.update(json.loads(key.value))  # type: ignore[union-attr]
 
     def parse_ssm_parameter(self, value: str, value_type: str) -> str:
@@ -1010,6 +1035,11 @@ class OutputMap(collections_abc.Mapping):  # type: ignore[type-arg]
         exports = []
         if self.outputs:
             for value in self._output_json_map.values():
+                if "Condition" in value and not self._resource_map.lazy_condition_map.get(
+                    value["Condition"]
+                ):
+                    # The output does not exist, so neither does its export
+                    continue
                 if value.get("Export"):
                     cleaned_name = clean_json(
                         value["Export"].get("Name"), self._resource_map

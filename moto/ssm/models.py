@@ -2329,7 +2329,12 @@ class SimpleSystemManagerBackend(BaseBackend, TaggableResourcesMixin):
         self._parameters[name].append(new_param)
 
         if tags:
-            tag_dict = {t["Key"]: t["Value"] for t in tags}
+            # The API takes a list of Key/Value pairs, CloudFormation a map
+            tag_dict = (
+                dict(tags)
+                if isinstance(tags, dict)
+                else {t["Key"]: t["Value"] for t in tags}
+            )
             self.add_tags_to_resource("Parameter", name, tag_dict)
 
         return new_param
