@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from moto.core.common_types import TYPE_RESPONSE
 from moto.core.responses import ActionResult, BaseResponse, EmptyResult
 
 from .exceptions import EntityNotFoundException, InvalidInputException
@@ -1189,3 +1190,36 @@ class GlueResponse(BaseResponse):
                 "NextToken": None,
             }
         )
+
+    @classmethod
+    def iceberg_dispatch(cls, request: Any, full_url: str, headers: Any) -> TYPE_RESPONSE:  # type: ignore[misc]
+        from moto.utilities import iceberg_rest
+        from moto.utilities.utils import get_partition
+
+        response = cls()
+        response.setup_class(request, full_url, headers)
+        backend = response.glue_backend
+        catalog = _GlueIcebergCatalog(backend)
+        path = full_url.split("/iceberg/v1/", 1)[1].split("?", 1)[0]
+        reader = iceberg_rest.s3_reader(response.current_account, get_partition(response.region))
+        return iceberg_rest.handle(request.method, path, catalog, reader)
+
+
+class _GlueIcebergCatalog:
+    """Glue databases are Iceberg namespaces; pyiceberg and Athena record `metadata_location` on the table."""
+
+    def __init__(self, backend: Any):
+        self.backend = backend
+
+    def namespaces(self) -> list[str]:
+        return [db.name for db in self.backend.get_databases()]
+
+    def tables(self, namespace: str) -> list[str]:
+        return [t.name for t in self.backend.get_tables(namespace, expression=None)]
+
+    def metadata_location(self, namespace: str, table: str) -> str | None:
+        try:
+            params = self.backend.get_table(namespace, table).as_dict().get("Parameters", {})
+        except Exception:
+            return None
+        return params.get("metadata_location")

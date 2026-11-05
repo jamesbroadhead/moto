@@ -312,3 +312,46 @@ class S3TablesResponse(BaseResponse):
             version_token=version_token,
         )
         return 200, {}, ""
+
+    @classmethod
+    def iceberg_dispatch(cls, request: Any, full_url: str, headers: Any) -> TYPE_RESPONSE:  # type: ignore[misc]
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        from moto.utilities import iceberg_rest
+        from moto.utilities.utils import get_partition
+
+        response = cls()
+        response.setup_class(request, full_url, headers)
+        url = urlparse(full_url)
+        path = url.path.split("/iceberg/v1/", 1)[1]
+        # The warehouse is the table bucket ARN: a query parameter of /config, then the path prefix
+        warehouse = parse_qs(url.query).get("warehouse", [None])[0]
+        if warehouse is None and "/namespaces" in path:
+            warehouse = unquote(path.split("/namespaces", 1)[0])
+            path = "namespaces" + path.split("/namespaces", 1)[1]
+        if path.strip("/") == "config":
+            body = {"defaults": {}, "overrides": {"prefix": warehouse or ""}}
+            return 200, {"Content-Type": "application/json"}, json.dumps(body)
+        bucket = response.s3tables_backend.table_buckets.get(warehouse or "")
+        if bucket is None:
+            return 404, {"Content-Type": "application/json"}, json.dumps(
+                {"error": {"message": f"Table bucket does not exist: {warehouse}", "type": "NoSuchWarehouseException", "code": 404}}
+            )
+        reader = iceberg_rest.s3_reader(response.current_account, get_partition(response.region))
+        return iceberg_rest.handle(request.method, path, _S3TablesIcebergCatalog(bucket), reader)
+
+
+class _S3TablesIcebergCatalog:
+    def __init__(self, bucket: Any):
+        self.bucket = bucket
+
+    def namespaces(self) -> list[str]:
+        return list(self.bucket.namespaces)
+
+    def tables(self, namespace: str) -> list[str]:
+        return list(self.bucket.namespaces[namespace].tables)
+
+    def metadata_location(self, namespace: str, table: str) -> str | None:
+        ns = self.bucket.namespaces.get(namespace)
+        t = ns.tables.get(table) if ns else None
+        return t.metadata_location if t else None

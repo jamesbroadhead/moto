@@ -7,6 +7,7 @@ url_bases = [
 ]
 
 url_paths = {
+    "{0}/iceberg/v1/(?P<iceberg_path>.*)$": S3TablesResponse.iceberg_dispatch,
     "{0}/buckets$": S3TablesResponse.dispatch,
     "{0}/buckets/(?P<tableBucketARN>.+)$": S3TablesResponse.dispatch,
     "{0}/buckets/(?P<tableBucketARN_pt_1>[^/]+)/(?P<tableBucketARN_pt_2>[^/]+)$": S3TablesResponse.dispatch,
