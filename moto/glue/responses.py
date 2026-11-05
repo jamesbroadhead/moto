@@ -84,10 +84,13 @@ class GlueResponse(BaseResponse):
         return ActionResult({"Table": table.as_dict()})
 
     def update_table(self) -> ActionResult:
-        database_name = self.parameters.get("DatabaseName")
-        table_input = self.parameters.get("TableInput")
-        table_name = table_input.get("Name")  # type: ignore
-        self.glue_backend.update_table(database_name, table_name, table_input)  # type: ignore[arg-type]
+        database_name = self._get_param("DatabaseName")
+        table_input = self._get_param("TableInput")
+        table_name = table_input.get("Name")
+        version_id = self._get_param("VersionId")
+        self.glue_backend.update_table(
+            database_name, table_name, table_input, version_id
+        )
         return EmptyResult()
 
     def get_table_versions(self) -> ActionResult:

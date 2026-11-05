@@ -5,6 +5,13 @@ class GlueClientError(JsonRESTError):
     code = 400
 
 
+class ConcurrentModificationException(GlueClientError):
+    def __init__(self) -> None:
+        super().__init__(
+            "ConcurrentModificationException", "Table being modified concurrently."
+        )
+
+
 class AlreadyExistsException(GlueClientError):
     def __init__(self, typ: str):
         super().__init__("AlreadyExistsException", f"{typ} already exists.")
