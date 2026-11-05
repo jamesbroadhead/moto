@@ -1,5 +1,7 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Barrier
 
 import boto3
 import pytest
@@ -382,6 +384,111 @@ def test_get_table_versions():
     table = client.get_tables(DatabaseName=database_name)["TableList"][0]
     assert table["StorageDescriptor"]["Columns"] == columns
     assert table["VersionId"] == "3"
+
+
+@mock_aws
+@pytest.mark.parametrize("table_parameters", [{}, {"table_type": "ICEBERG"}])
+def test_update_table_rejects_stale_version(table_parameters):
+    client = boto3.client("glue", region_name="us-east-1")
+    client.create_database(DatabaseInput={"Name": "database"})
+    original_input = {
+        "Name": "events",
+        "Parameters": {
+            **table_parameters,
+            "metadata_location": "s3://bucket/original.json",
+        },
+    }
+    client.create_table(DatabaseName="database", TableInput=original_input)
+    original = client.get_table(DatabaseName="database", Name="events")["Table"]
+    writer_a = {
+        **original_input,
+        "Parameters": {**table_parameters, "metadata_location": "s3://bucket/a.json"},
+    }
+    writer_b = {
+        **original_input,
+        "Parameters": {**table_parameters, "metadata_location": "s3://bucket/b.json"},
+    }
+    client.update_table(
+        DatabaseName="database", TableInput=writer_a, VersionId=original["VersionId"]
+    )
+    accepted = client.get_table(DatabaseName="database", Name="events")["Table"]
+    versions = client.get_table_versions(DatabaseName="database", TableName="events")[
+        "TableVersions"
+    ]
+    assert accepted["VersionId"] != original["VersionId"]
+
+    with pytest.raises(client.exceptions.ConcurrentModificationException) as exc:
+        client.update_table(
+            DatabaseName="database",
+            TableInput=writer_b,
+            VersionId=original["VersionId"],
+        )
+
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert client.get_table(DatabaseName="database", Name="events")["Table"] == accepted
+    assert (
+        client.get_table_versions(DatabaseName="database", TableName="events")[
+            "TableVersions"
+        ]
+        == versions
+    )
+    client.update_table(
+        DatabaseName="database", TableInput=writer_b, VersionId=accepted["VersionId"]
+    )
+    retried = client.get_table(DatabaseName="database", Name="events")["Table"]
+    assert retried["VersionId"] != accepted["VersionId"]
+    assert retried["Parameters"] == writer_b["Parameters"]
+
+
+@mock_aws
+def test_update_table_without_version_id():
+    client = boto3.client("glue", region_name="us-east-1")
+    client.create_database(DatabaseInput={"Name": "database"})
+    client.create_table(DatabaseName="database", TableInput={"Name": "events"})
+    original = client.get_table(DatabaseName="database", Name="events")["Table"]
+    client.update_table(
+        DatabaseName="database",
+        TableInput={"Name": "events", "Description": "unconditional update"},
+    )
+    updated = client.get_table(DatabaseName="database", Name="events")["Table"]
+    assert updated["VersionId"] != original["VersionId"]
+    assert updated["Description"] == "unconditional update"
+
+
+@mock_aws
+def test_update_table_concurrent_writers():
+    client = boto3.client("glue", region_name="us-east-1")
+    client.create_database(DatabaseInput={"Name": "database"})
+    client.create_table(DatabaseName="database", TableInput={"Name": "events"})
+    version_id = client.get_table(DatabaseName="database", Name="events")["Table"][
+        "VersionId"
+    ]
+    barrier = Barrier(4, timeout=10)
+
+    def update(writer):
+        barrier.wait()
+        try:
+            client.update_table(
+                DatabaseName="database",
+                TableInput={"Name": "events", "Description": str(writer)},
+                VersionId=version_id,
+            )
+            return str(writer)
+        except client.exceptions.ConcurrentModificationException:
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        outcomes = list(executor.map(update, range(4)))
+
+    winners = [writer for writer in outcomes if writer is not None]
+    assert len(winners) == 1
+    table = client.get_table(DatabaseName="database", Name="events")["Table"]
+    assert table["Description"] == winners[0]
+    assert table["VersionId"] != version_id
+    versions = client.get_table_versions(DatabaseName="database", TableName="events")[
+        "TableVersions"
+    ]
+    assert len(versions) == 2
 
 
 @mock_aws
