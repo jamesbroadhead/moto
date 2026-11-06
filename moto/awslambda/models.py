@@ -58,6 +58,7 @@ from .exceptions import (
     InvalidParameterValueException,
     InvalidRoleFormat,
     LambdaClientError,
+    ResourceConflictException,
     UnknownAliasException,
     UnknownEventConfig,
     UnknownFunctionException,
@@ -1929,6 +1930,22 @@ class LambdaStorage:
             name_or_arn, qualifier
         )
         name = function.function_name
+        if qualifier and qualifier.isdigit():
+            arn, _, _ = self.split_function_arn(function.function_arn)
+            for alias in self._aliases.get(arn, {}).values():
+                additional_versions: dict[str, float] = (
+                    alias.routing_config.get("AdditionalVersionWeights", {})
+                    if isinstance(alias.routing_config, dict)
+                    else {}
+                )
+                if (
+                    alias.function_version == qualifier
+                    or qualifier in additional_versions
+                ):
+                    raise ResourceConflictException(
+                        f"Cannot delete version {qualifier} of function because it "
+                        "is referenced by one or more aliases"
+                    )
         if not qualifier:
             # Something is still reffing this so delete all arns
             latest = self._functions[name]["latest"].function_arn
