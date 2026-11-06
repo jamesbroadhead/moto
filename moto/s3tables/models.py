@@ -80,7 +80,7 @@ PAGINATION_MODEL = {
 }
 
 
-class Table:
+class Table(CloudFormationModel):
     def __init__(
         self,
         name: str,
@@ -131,6 +131,50 @@ class Table:
         ].create_table_storage_bucket(region_name=self.region_name)
         return bucket
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::S3Tables::Table"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "TableName"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Table":
+        props = cloudformation_json.get("Properties", {})
+        return s3tables_backends[account_id][region_name].create_table(
+            table_bucket_arn=props["TableBucketARN"],
+            namespace=props["Namespace"],
+            name=props.get("TableName", resource_name),
+            format=props.get("OpenTableFormat", "ICEBERG"),
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.arn
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["TableARN", "WarehouseLocation", "VersionToken"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "TableARN":
+            return self.arn
+        if attribute_name == "WarehouseLocation":
+            return self.warehouse_location
+        if attribute_name == "VersionToken":
+            return self.version_token
+        raise UnformattedGetAttTemplateException()
+
     def update_metadata_location(
         self, metadata_location: str, version_token: str
     ) -> None:
@@ -148,7 +192,7 @@ class Table:
         self.was_modified(by)
 
 
-class Namespace:
+class Namespace(CloudFormationModel):
     def __init__(self, name: str, account_id: str, created_by: str):
         _validate_namespace_name(name)
         self.name = name
@@ -156,6 +200,36 @@ class Namespace:
         self.created_by = created_by
         self.creation_date = datetime.datetime.now(tz=datetime.timezone.utc)
         self.tables: dict[str, Table] = {}
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::S3Tables::Namespace"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Namespace"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Namespace":
+        props = cloudformation_json.get("Properties", {})
+        bucket_arn = props["TableBucketARN"]
+        namespace = s3tables_backends[account_id][region_name].create_namespace(
+            bucket_arn, props.get("Namespace", resource_name)
+        )
+        namespace.table_bucket_arn = bucket_arn
+        return namespace
+
+    @property
+    def physical_resource_id(self) -> str:
+        # Ref returns "<table bucket ARN>|<namespace>"
+        return f"{getattr(self, 'table_bucket_arn', '')}|{self.name}"
 
 
 class FakeTableBucket(CloudFormationModel):
