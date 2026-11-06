@@ -149,12 +149,60 @@ class Table(CloudFormationModel):
         **kwargs: Any,
     ) -> "Table":
         props = cloudformation_json.get("Properties", {})
-        return s3tables_backends[account_id][region_name].create_table(
+        table = s3tables_backends[account_id][region_name].create_table(
             table_bucket_arn=props["TableBucketARN"],
             namespace=props["Namespace"],
             name=props.get("TableName", resource_name),
             format=props.get("OpenTableFormat", "ICEBERG"),
         )
+        fields = (
+            props.get("IcebergMetadata", {})
+            .get("IcebergSchema", {})
+            .get("SchemaFieldList")
+        )
+        if fields:
+            table.write_initial_metadata(fields)
+        return table
+
+    def write_initial_metadata(self, fields: list[dict[str, Any]]) -> None:
+        """As S3 Tables does for a table created with a schema: metadata version 0."""
+        import uuid
+
+        # Optional dependency: only tables created with a schema need it
+        from pyiceberg.partitioning import UNPARTITIONED_PARTITION_SPEC
+        from pyiceberg.schema import Schema
+        from pyiceberg.table.metadata import new_table_metadata
+        from pyiceberg.table.sorting import UNSORTED_SORT_ORDER
+
+        from moto.s3.models import s3_backends
+
+        schema = Schema.model_validate(
+            {
+                "type": "struct",
+                "schema-id": 0,
+                "fields": [
+                    {
+                        "id": int(f.get("Id", i + 1)),
+                        "name": f["Name"],
+                        "type": f["Type"],
+                        "required": str(f.get("Required", False)).lower() == "true",
+                    }
+                    for i, f in enumerate(fields)
+                ],
+            }
+        )
+        metadata = new_table_metadata(
+            schema=schema,
+            partition_spec=UNPARTITIONED_PARTITION_SPEC,
+            sort_order=UNSORTED_SORT_ORDER,
+            location=self.warehouse_location,
+        )
+        location = f"{self.warehouse_location}/metadata/00000-{uuid.uuid4()}.metadata.json"
+        bucket, key = location.removeprefix("s3://").split("/", 1)
+        s3_backends[self.account_id][self.partition].put_object(
+            bucket, key, metadata.model_dump_json().encode()
+        )
+        self.update_metadata_location(location, self.version_token)
 
     @property
     def physical_resource_id(self) -> str:
