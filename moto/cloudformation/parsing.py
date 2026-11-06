@@ -25,6 +25,7 @@ from moto.apigateway import models as apigw_models  # noqa
 from moto.apigatewayv2 import models as apigwv2_models  # noqa
 from moto.autoscaling import models as as_models  # noqa
 from moto.awslambda import models as lambda_models  # noqa
+from moto.athena import models as athena_models  # noqa
 from moto.batch import models as batch_models  # noqa
 from moto.cloudformation.custom_model import CustomModel
 from moto.cloudwatch import models as cw_models  # noqa

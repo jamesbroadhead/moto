@@ -12,7 +12,7 @@ from moto.athena.exceptions import (
     QueryStillRunning,
 )
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel
+from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.moto_api._internal import mock_random
 from moto.moto_api._internal.managed_state_model import ManagedState
@@ -51,7 +51,39 @@ class TaggableResourceMixin:
         return self.tags
 
 
-class WorkGroup(TaggableResourceMixin, BaseModel):
+class WorkGroup(TaggableResourceMixin, CloudFormationModel):
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::Athena::WorkGroup"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "WorkGroup":
+        p = cloudformation_json.get("Properties", {})
+        backend = athena_backends[account_id][region_name]
+        name = p.get("Name", resource_name)
+        backend.create_work_group(
+            name,
+            p.get("WorkGroupConfiguration") or {},
+            p.get("Description", ""),
+            p.get("Tags") or [],
+        )
+        return backend.work_groups[name]
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
     resource_type = "workgroup"
     state = "ENABLED"
 
@@ -90,7 +122,40 @@ class WorkGroup(TaggableResourceMixin, BaseModel):
             self.configuration["RequesterPaysEnabled"] = False
 
 
-class DataCatalog(TaggableResourceMixin, BaseModel):
+class DataCatalog(TaggableResourceMixin, CloudFormationModel):
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::Athena::DataCatalog"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "DataCatalog":
+        p = cloudformation_json.get("Properties", {})
+        backend = athena_backends[account_id][region_name]
+        name = p.get("Name", resource_name)
+        backend.create_data_catalog(
+            name,
+            p.get("Type", "GLUE"),
+            p.get("Description", ""),
+            p.get("Parameters"),  # type: ignore[arg-type]
+            p.get("Tags") or [],
+        )
+        return backend.data_catalogs[name]
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
     def __init__(
         self,
         athena_backend: "AthenaBackend",
