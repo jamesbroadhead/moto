@@ -9,6 +9,7 @@ from threading import Condition
 from typing import TYPE_CHECKING, Any
 from urllib.parse import ParseResult
 
+from moto import settings
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
@@ -575,7 +576,7 @@ class Queue(CloudFormationModel):
             self._messages_lock.notify_all()
 
         for arn, esm in self.lambda_event_source_mappings.items():
-            if not esm.enabled:
+            if not esm.enabled or settings.lambda_event_source_mappings_disabled():
                 continue
             backend = sqs_backends[self.account_id][self.region]
 

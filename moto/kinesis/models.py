@@ -10,6 +10,7 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Any
 
 from moto.cloudwatch.models import cloudwatch_backends
+from moto import settings
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.utils import unix_time, utcnow
@@ -419,6 +420,8 @@ class Stream(CloudFormationModel):
         from moto.awslambda.utils import get_backend
 
         for arn, esm in self.lambda_event_source_mappings.items():
+            if settings.lambda_event_source_mappings_disabled():
+                break
             region = arn.split(":")[3]
 
             get_backend(self.account_id, region).send_kinesis_message(

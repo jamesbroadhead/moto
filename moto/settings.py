@@ -114,6 +114,11 @@ def lambda_invoke_endpoint() -> str | None:
     return os.environ.get("MOTO_LAMBDA_INVOKE_ENDPOINT") or None
 
 
+def lambda_event_source_mappings_disabled() -> bool:
+    """Leave event source mappings to an external poller: moto then does not invoke functions for them."""
+    return os.environ.get("MOTO_LAMBDA_EVENT_SOURCE_MAPPINGS_DISABLED", "false").lower() == "true"
+
+
 def lambda_stub_ecr() -> bool:
     # Whether to stub or mock ecr backend when deploying image based lambdas.
     # True => don't requiring image presence in moto ecr backend for `create_function`.
