@@ -90,6 +90,10 @@ Configuring this queue by making an HTTP request to `/moto-api/static/athena/que
 
 Query results will also be stored in the S3 output location (in CSV format).
 
+To run queries instead, set MOTO_ATHENA_SQL_ENGINE=iceberg and install sqlglot, pyiceberg[pyarrow] and duckdb (pyiceberg-core too for bucket and truncate partitions). Moto then executes each query when it starts, over the Glue Data Catalog and S3:
+CREATE TABLE (Iceberg, via TBLPROPERTIES ('table_type'='iceberg')), CREATE EXTERNAL TABLE (Hive JSON, Parquet or delimited text), ALTER TABLE ADD COLUMNS / DROP COLUMN, DROP TABLE, CREATE/DROP DATABASE, SHOW TABLES, SHOW COLUMNS, DESCRIBE, SELECT, and INSERT, UPDATE and DELETE on Iceberg tables.
+A query that cannot run ends FAILED, with the reason in StateChangeReason. Tables are loaded whole into DuckDB, so this suits test-sized data.
+
 
 
 - [X] get_query_runtime_statistics
@@ -97,7 +101,7 @@ Query results will also be stored in the S3 output location (in CSV format).
 - [ ] get_session
 - [ ] get_session_endpoint
 - [ ] get_session_status
-- [ ] get_table_metadata
+- [X] get_table_metadata
 - [X] get_work_group
 - [ ] import_notebook
 - [ ] list_application_dpu_sizes
@@ -113,7 +117,7 @@ Query results will also be stored in the S3 output location (in CSV format).
 - [ ] list_prepared_statements
 - [X] list_query_executions
 - [ ] list_sessions
-- [ ] list_table_metadata
+- [X] list_table_metadata
 - [X] list_tags_for_resource
 - [X] list_work_groups
 - [ ] put_capacity_assignment_configuration
