@@ -590,6 +590,11 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
 
             if not resource_json:
                 raise KeyError(resource_logical_id)
+            # A reference can create this resource early; its dependencies come first all the same
+            depends_on = resource_json.get("DependsOn") or []
+            for dependency in [depends_on] if isinstance(depends_on, str) else depends_on:
+                if dependency in self._resource_json_map:
+                    self[dependency]
             try:
                 new_resource = parse_and_create_resource(
                     resource_logical_id,
