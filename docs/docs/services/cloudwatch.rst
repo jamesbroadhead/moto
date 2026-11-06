@@ -52,7 +52,11 @@ cloudwatch
 - [X] list_tags_for_resource
 - [ ] put_alarm_mute_rule
 - [ ] put_anomaly_detector
-- [ ] put_composite_alarm
+- [X] put_composite_alarm
+
+  Supports rule evaluation when alarm state is changed through the API, nested
+  composite alarms, and cycle detection. Alarm actions and action suppression
+  timers are not executed.
 - [X] put_dashboard
 - [X] put_insight_rule
 - [ ] put_log_alarm

@@ -124,6 +124,10 @@ class CloudWatchResponse(BaseResponse):
         )
         return EmptyResult()
 
+    def put_composite_alarm(self) -> ActionResult:
+        self.cloudwatch_backend.put_composite_alarm(self._get_params())
+        return EmptyResult()
+
     def describe_alarms(self) -> ActionResult:
         action_prefix = self._get_param("ActionPrefix")
         alarm_name_prefix = self._get_param("AlarmNamePrefix")
@@ -143,8 +147,14 @@ class CloudWatchResponse(BaseResponse):
         else:
             alarms = self.cloudwatch_backend.describe_alarms()
 
-        metric_alarms = [a for a in alarms if a.rule is None]
-        composite_alarms = [a for a in alarms if a.rule is not None]
+        alarms = list(alarms)
+        alarm_types = self._get_param("AlarmTypes", ["MetricAlarm"])
+        metric_alarms = [
+            a for a in alarms if a.rule is None and "MetricAlarm" in alarm_types
+        ]
+        composite_alarms = [
+            a for a in alarms if a.rule is not None and "CompositeAlarm" in alarm_types
+        ]
 
         result = {"MetricAlarms": metric_alarms, "CompositeAlarms": composite_alarms}
         return ActionResult(result)

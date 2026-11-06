@@ -17,10 +17,12 @@ from moto.core.utils import utcnow
 from moto.moto_api._internal import mock_random
 
 from ..utilities.tagging_service import TaggingService
+from .alarm_rule import AlarmRule
 from .exceptions import (
     InvalidFormat,
     InvalidParameterCombination,
     InvalidParameterValue,
+    ResourceConflict,
     ResourceNotFound,
     ResourceNotFoundException,
     ValidationError,
@@ -181,6 +183,9 @@ class Alarm(BaseModel):
 
         # only used for composite alarms
         self.rule = rule
+        self.actions_suppressor: str | None = None
+        self.actions_suppressor_wait_period: int | None = None
+        self.actions_suppressor_extension_period: int | None = None
 
     def update_state(self, reason: str, reason_data: str, state_value: str) -> None:
         # History type, that then decides what the rest of the items are, can be one of ConfigurationUpdate | StateUpdate | Action
@@ -601,7 +606,119 @@ class CloudWatchBackend(BaseBackend, TaggableResourcesMixin):
         if tags:
             self.tagger.tag_resource(alarm.alarm_arn, tags)
 
+        if rule is None:
+            self._evaluate_composite_alarms(name)
         return alarm
+
+    def put_composite_alarm(self, parameters: dict[str, Any]) -> None:
+        name = parameters["AlarmName"]
+        rule = parameters["AlarmRule"]
+        try:
+            AlarmRule(rule)
+        except (ValueError, RecursionError) as exc:
+            raise InvalidParameterValue(f"Invalid AlarmRule: {exc}") from exc
+        old = self.alarms.get(name)
+        if old is not None and old.rule is None:
+            raise ValidationError(
+                "Cannot replace a metric alarm with a composite alarm"
+            )
+        suppressor = parameters.get("ActionsSuppressor")
+        if suppressor and any(
+            field not in parameters
+            for field in (
+                "ActionsSuppressorWaitPeriod",
+                "ActionsSuppressorExtensionPeriod",
+            )
+        ):
+            raise ValidationError(
+                "ActionsSuppressor requires wait and extension periods"
+            )
+        alarm = self.put_metric_alarm(
+            name=name,
+            namespace="",
+            metric_name="",
+            comparison_operator="",
+            evaluation_periods=0,
+            period=0,
+            threshold=0,
+            statistic="",
+            description=parameters.get("AlarmDescription", ""),
+            dimensions=[],
+            alarm_actions=parameters.get("AlarmActions", []),
+            ok_actions=parameters.get("OKActions", []),
+            insufficient_data_actions=parameters.get("InsufficientDataActions", []),
+            actions_enabled=parameters.get("ActionsEnabled", True),
+            rule=rule,
+            tags=parameters.get("Tags") if old is None else None,
+        )
+        alarm.actions_suppressor = suppressor
+        alarm.actions_suppressor_wait_period = parameters.get(
+            "ActionsSuppressorWaitPeriod"
+        )
+        alarm.actions_suppressor_extension_period = parameters.get(
+            "ActionsSuppressorExtensionPeriod"
+        )
+        if old is not None:
+            alarm.state_value = old.state_value
+            alarm.state_reason = old.state_reason
+            alarm.state_reason_data = old.state_reason_data
+            alarm.state_updated_timestamp = old.state_updated_timestamp
+            alarm.history = old.history
+        else:
+            alarm.state_value = "INSUFFICIENT_DATA"
+            self._evaluate_composite_alarms(name, evaluate_changed=True)
+
+    def _evaluate_composite_alarms(
+        self, changed: str, evaluate_changed: bool = False
+    ) -> None:
+        rules = {
+            name: AlarmRule(alarm.rule)
+            for name, alarm in self.alarms.items()
+            if alarm.rule is not None
+        }
+        names = {alarm.alarm_arn: name for name, alarm in self.alarms.items()}
+        affected = {changed}
+        while True:
+            parents = {
+                name
+                for name, rule in rules.items()
+                if any(names.get(ref, ref) in affected for ref in rule.references)
+            }
+            if parents.issubset(affected):
+                break
+            affected.update(parents)
+        if not evaluate_changed:
+            affected.discard(changed)
+        visiting: set[str] = set()
+        evaluated: dict[str, str | None] = {}
+
+        def evaluate(reference: str) -> str | None:
+            name = names.get(reference, reference)
+            if name in visiting:
+                return None
+            alarm = self.alarms.get(name)
+            if alarm is None:
+                return ""
+            if name not in rules:
+                return alarm.state_value
+            if name in evaluated:
+                return evaluated[name]
+            visiting.add(name)
+            result = rules[name].evaluate(evaluate)
+            visiting.remove(name)
+            if result is None:
+                evaluated[name] = None
+                return None
+            state = (
+                ("ALARM" if result else "OK") if name in affected else alarm.state_value
+            )
+            if state != alarm.state_value:
+                alarm.update_state("Composite alarm rule evaluated", "{}", state)
+            evaluated[name] = state
+            return state
+
+        for name in affected:
+            evaluate(name)
 
     def describe_alarms(self) -> Iterable[Alarm]:
         return self.alarms.values()
@@ -639,8 +756,33 @@ class CloudWatchBackend(BaseBackend, TaggableResourcesMixin):
         )
 
     def delete_alarms(self, alarm_names: list[str]) -> None:
+        composites = {
+            name: alarm
+            for name, alarm in self.alarms.items()
+            if name in alarm_names and alarm.rule is not None
+        }
+        if len(composites) > 1:
+            raise ValidationError("Only one composite alarm can be deleted per request")
+        names = {alarm.alarm_arn: name for name, alarm in self.alarms.items()}
+        for target, alarm in composites.items():
+            assert alarm.rule is not None
+            pending = list(AlarmRule(alarm.rule).references)
+            visited: set[str] = set()
+            while pending:
+                name = names.get(pending[-1], pending[-1])
+                pending.pop()
+                if name == target:
+                    raise ResourceConflict("Cannot delete a composite alarm in a cycle")
+                if name in visited:
+                    continue
+                visited.add(name)
+                child = self.alarms.get(name)
+                if child is not None and child.rule is not None:
+                    pending.extend(AlarmRule(child.rule).references)
         for alarm_name in alarm_names:
             self.alarms.pop(alarm_name, None)
+        for alarm_name in alarm_names:
+            self._evaluate_composite_alarms(alarm_name)
 
     def enable_alarm_actions(self, alarm_names: list[str]) -> None:
         for alarm in self.get_alarms_by_alarm_names(alarm_names):
@@ -985,6 +1127,7 @@ class CloudWatchBackend(BaseBackend, TaggableResourcesMixin):
             )
 
         self.alarms[alarm_name].update_state(reason, reason_data, state_value)
+        self._evaluate_composite_alarms(alarm_name)
 
     def list_metrics(
         self,
