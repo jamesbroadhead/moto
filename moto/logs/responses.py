@@ -3,6 +3,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from moto.core.exceptions import InvalidToken
 from moto.core.responses import ActionResult, BaseResponse
 
 from .exceptions import InvalidParameterException
@@ -442,6 +443,61 @@ class LogsResponse(BaseResponse):
         )
 
         return json.dumps({"queryId": f"{query_id}"})
+
+    def put_query_definition(self) -> str:
+        parameters = {
+            "name": self._get_validated_param(
+                "name", "Length must be 1 to 255", lambda x: 1 <= len(x) <= 255
+            ),
+            "queryString": self._get_validated_param(
+                "queryString",
+                "Length must be 1 to 10000",
+                lambda x: 1 <= len(x) <= 10000,
+            ),
+        }
+        for key in (
+            "queryDefinitionId",
+            "logGroupNames",
+            "queryLanguage",
+            "clientToken",
+            "parameters",
+        ):
+            value = self._get_param(key)
+            if value is not None:
+                parameters[key] = value
+        query_id = self.logs_backend.put_query_definition(parameters)
+        return json.dumps({"queryDefinitionId": query_id})
+
+    def describe_query_definitions(self) -> str:
+        limit = self._get_param("maxResults", 1000)
+        if not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise InvalidParameterException("maxResults must be between 1 and 1000")
+        prefix = self._get_validated_param(
+            "queryDefinitionNamePrefix",
+            "Length must be 1 to 255",
+            lambda x: x is None or 1 <= len(x) <= 255,
+        )
+        try:
+            definitions, next_token = self.logs_backend.describe_query_definitions(
+                name_prefix=prefix,
+                query_language=self._get_param("queryLanguage"),
+                limit=limit,
+                next_token=self._get_param("nextToken"),
+            )
+        except InvalidToken as exc:
+            raise InvalidParameterException("Invalid nextToken") from exc
+        result: dict[str, Any] = {
+            "queryDefinitions": [definition.to_json() for definition in definitions]
+        }
+        if next_token:
+            result["nextToken"] = next_token
+        return json.dumps(result)
+
+    def delete_query_definition(self) -> str:
+        success = self.logs_backend.delete_query_definition(
+            self._get_param("queryDefinitionId")
+        )
+        return json.dumps({"success": success})
 
     def describe_queries(self) -> str:
         log_group_name = self._get_param("logGroupName")

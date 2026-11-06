@@ -1,4 +1,10 @@
 PAGINATION_MODEL = {
+    "describe_query_definitions": {
+        "input_token": "next_token",
+        "limit_key": "limit",
+        "limit_default": 1000,
+        "unique_attribute": "query_definition_id",
+    },
     "describe_log_groups": {
         "input_token": "next_token",
         "limit_key": "limit",
