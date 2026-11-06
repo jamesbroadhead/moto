@@ -604,7 +604,7 @@
 
 ## athena
 <details>
-<summary>38% implemented</summary>
+<summary>41% implemented</summary>
 
 - [ ] batch_get_named_query
 - [ ] batch_get_prepared_statement
@@ -641,7 +641,7 @@
 - [ ] get_session
 - [ ] get_session_endpoint
 - [ ] get_session_status
-- [ ] get_table_metadata
+- [X] get_table_metadata
 - [X] get_work_group
 - [ ] import_notebook
 - [ ] list_application_dpu_sizes
@@ -657,7 +657,7 @@
 - [ ] list_prepared_statements
 - [X] list_query_executions
 - [ ] list_sessions
-- [ ] list_table_metadata
+- [X] list_table_metadata
 - [X] list_tags_for_resource
 - [X] list_work_groups
 - [ ] put_capacity_assignment_configuration

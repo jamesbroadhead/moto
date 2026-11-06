@@ -126,6 +126,12 @@ def lambda_stub_ecr() -> bool:
     return os.environ.get("MOTO_LAMBDA_STUB_ECR", "TRUE").lower() != "false"
 
 
+def athena_sql_engine() -> str | None:
+    # "iceberg" runs Athena queries over Glue/Iceberg tables; unset keeps canned results
+    engine = os.environ.get("MOTO_ATHENA_SQL_ENGINE", "").lower()
+    return engine if engine == "iceberg" else None
+
+
 def moto_server_port() -> str:
     return os.environ.get("MOTO_PORT") or "5000"
 

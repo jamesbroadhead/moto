@@ -70,6 +70,8 @@ class AthenaResponse(BaseResponse):
         statement_type = "DML"
         if execution.query.upper().startswith(ddl_commands):
             statement_type = "DDL"
+        if execution.statement_type:
+            statement_type = execution.statement_type
         result = {
             "QueryExecution": {
                 "QueryExecutionId": exec_id,
@@ -102,7 +104,34 @@ class AthenaResponse(BaseResponse):
             result["QueryExecution"]["ExecutionParameters"] = (
                 execution.execution_parameters
             )
+        if execution.substatement_type:
+            result["QueryExecution"]["SubstatementType"] = execution.substatement_type
+        if execution.state_change_reason and execution.status == "FAILED":
+            status = result["QueryExecution"]["Status"]
+            status["StateChangeReason"] = execution.state_change_reason
+            status["AthenaError"] = {
+                "ErrorCategory": 2,
+                "ErrorType": 1000,
+                "Retryable": False,
+                "ErrorMessage": execution.state_change_reason,
+            }
         return json.dumps(result)
+
+    def get_table_metadata(self) -> str:
+        metadata = self.athena_backend.get_table_metadata(
+            catalog_name=self._get_param("CatalogName"),
+            database_name=self._get_param("DatabaseName"),
+            table_name=self._get_param("TableName"),
+        )
+        return json.dumps({"TableMetadata": metadata})
+
+    def list_table_metadata(self) -> str:
+        tables = self.athena_backend.list_table_metadata(
+            catalog_name=self._get_param("CatalogName"),
+            database_name=self._get_param("DatabaseName"),
+            expression=self._get_param("Expression"),
+        )
+        return json.dumps({"TableMetadataList": tables})
 
     def create_capacity_reservation(self) -> tuple[str, dict[str, int]] | str:
         name = self._get_param("Name")

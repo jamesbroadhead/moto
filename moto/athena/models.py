@@ -1,9 +1,11 @@
+import json
 import re
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import Any
 
+from moto import settings
 from moto.athena.exceptions import (
     InvalidArgumentException,
     MetadataException,
@@ -16,6 +18,7 @@ from moto.moto_api._internal import mock_random
 from moto.moto_api._internal.managed_state_model import ManagedState
 from moto.s3.models import s3_backends
 from moto.s3.utils import bucket_and_name_from_url
+from moto.utilities import iceberg_rest
 from moto.utilities.paginator import paginate
 from moto.utilities.tagging_service import TaggingService
 from moto.utilities.utils import get_partition
@@ -133,25 +136,43 @@ class Execution(ManagedState):
         self.execution_parameters = execution_parameters
         self.start_time = time.time()
         self.end_time = time.time()
+        # Set when MOTO_ATHENA_SQL_ENGINE runs the query
+        self.state_change_reason: str | None = None
+        self.statement_type: str | None = None
+        self.substatement_type: str | None = None
 
         if self.config is not None and "OutputLocation" in self.config:
             if not self.config["OutputLocation"].endswith("/"):
                 self.config["OutputLocation"] += "/"
             self.config["OutputLocation"] += f"{self.id}.csv"
 
+    def fail(self, reason: str) -> None:
+        """The query ends FAILED instead of SUCCEEDED, still advancing as the state manager says."""
+        self._transitions = [("QUEUED", "RUNNING"), ("RUNNING", "FAILED")]
+        self.state_change_reason = reason
+
 
 class QueryResults(BaseModel):
-    def __init__(self, rows: list[dict[str, Any]], column_info: list[dict[str, str]]):
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        column_info: list[dict[str, Any]],
+        update_count: int | None = None,
+    ):
         self.rows = rows
         self.column_info = column_info
+        self.update_count = update_count
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "ResultSet": {
                 "Rows": self.rows,
                 "ResultSetMetadata": {"ColumnInfo": self.column_info},
             },
         }
+        if self.update_count is not None:
+            result["UpdateCount"] = self.update_count
+        return result
 
 
 class CapacityReservation(TaggableResourceMixin, BaseModel):
@@ -329,9 +350,91 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
         self.executions[execution.id] = execution
 
         self._process_ddl(query, context)
+        if settings.athena_sql_engine():
+            self._run_query(execution)
         self._store_predefined_query_results(execution.id)
 
         return execution.id
+
+    def _run_query(self, execution: Execution) -> None:
+        """Runs the query with the engine MOTO_ATHENA_SQL_ENGINE names; see `moto.athena.sql_engine`."""
+        context: dict[str, Any] = (
+            execution.context if isinstance(execution.context, dict) else {}
+        )
+        catalog = context.get("Catalog") or "AwsDataCatalog"
+        if catalog.lower() != "awsdatacatalog":
+            reason = f"NOT_SUPPORTED: moto runs queries in AwsDataCatalog only, not {catalog}"
+            self._finish(execution, reason)
+            return
+        try:
+            from moto.athena.sql_engine import SqlEngine
+        except ImportError as e:
+            reason = f"MOTO_ATHENA_SQL_ENGINE needs sqlglot, pyiceberg, pyarrow and duckdb: {e}"
+            self._finish(execution, reason)
+            return
+        engine = SqlEngine(self.account_id, self.region_name)
+        outcome = engine.execute(execution.query, context.get("Database") or "default")
+        execution.statement_type = outcome.statement_type
+        execution.substatement_type = outcome.substatement_type
+        if outcome.error is None:
+            self.query_results[execution.id] = QueryResults(
+                outcome.rows, outcome.column_info, outcome.update_count
+            )
+            self._store_query_result_in_s3(execution.id)
+        self._finish(execution, outcome.error)
+
+    def _finish(self, execution: Execution, error: str | None) -> None:
+        if error:
+            execution.fail(error)
+        execution.end_time = time.time()
+
+    def get_table_metadata(
+        self, catalog_name: str, database_name: str, table_name: str
+    ) -> dict[str, Any]:
+        from moto.glue.exceptions import EntityNotFoundException
+        from moto.glue.models import glue_backends
+
+        glue = glue_backends[self.account_id][self.region_name]
+        try:
+            table = glue.get_table(database_name, table_name)
+        except EntityNotFoundException as e:
+            raise MetadataException(
+                f"An error occurred (EntityNotFoundException) when calling the GetTable "
+                f"operation: {e.message} (Service: AmazonDataCatalog; Status Code: 400; "
+                f"Error Code: EntityNotFoundException)"
+            )
+        return self._table_metadata(table.as_dict())
+
+    def list_table_metadata(
+        self, catalog_name: str, database_name: str, expression: str | None
+    ) -> list[dict[str, Any]]:
+        from moto.glue.exceptions import EntityNotFoundException
+        from moto.glue.models import glue_backends
+
+        glue = glue_backends[self.account_id][self.region_name]
+        try:
+            tables = glue.get_tables(database_name, expression)
+        except EntityNotFoundException as e:
+            raise MetadataException(e.message)
+        return [self._table_metadata(t.as_dict()) for t in tables]
+
+    def _table_metadata(self, table: dict[str, Any]) -> dict[str, Any]:
+        reader = iceberg_rest.s3_reader(self.account_id, self.partition)
+        columns, partition_keys = glue_table_columns(table, reader)
+        metadata = {
+            "Name": table["Name"],
+            "CreateTime": table["CreateTime"].timestamp(),
+            "TableType": table.get("TableType", "EXTERNAL_TABLE"),
+            "Columns": columns,
+            "PartitionKeys": partition_keys,
+            "Parameters": {
+                **(table.get("Parameters") or {}),
+                **_storage_parameters(table.get("StorageDescriptor") or {}),
+            },
+        }
+        if table.get("UpdateTime"):
+            metadata["LastAccessTime"] = table["UpdateTime"].timestamp()
+        return metadata
 
     _CREATE_DB_PATTERN = re.compile(
         r"^\s*CREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([^\s`;`]+)`?\s*",
@@ -459,6 +562,9 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
 
         Query results will also be stored in the S3 output location (in CSV format).
 
+        To run queries instead, set MOTO_ATHENA_SQL_ENGINE=iceberg and install sqlglot, pyiceberg[pyarrow] and duckdb (pyiceberg-core too for bucket and truncate partitions). Moto then executes each query when it starts, over the Glue Data Catalog and S3:
+        CREATE TABLE (Iceberg, via TBLPROPERTIES ('table_type'='iceberg')), CREATE EXTERNAL TABLE (Hive JSON, Parquet or delimited text), ALTER TABLE ADD COLUMNS / DROP COLUMN, DROP TABLE, CREATE/DROP DATABASE, SHOW TABLES, SHOW COLUMNS, DESCRIBE, SELECT, and INSERT, UPDATE and DELETE on Iceberg tables.
+        A query that cannot run ends FAILED, with the reason in StateChangeReason. Tables are loaded whole into DuckDB, so this suits test-sized data.
         """
         if (exctn := self.executions.get(exec_id)) and exctn.status != "SUCCEEDED":
             raise QueryStillRunning(current_status=exctn.status)
@@ -644,6 +750,76 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
 
     def untag_resource(self, arn: str, tag_keys: list[str]) -> None:
         self.tagger.untag_resource_using_names(arn, tag_keys)
+
+
+def _storage_parameters(storage: dict[str, Any]) -> dict[str, str]:
+    """The storage details Athena folds into a table's metadata parameters."""
+    parameters = {}
+    if storage.get("Location"):
+        parameters["location"] = storage["Location"]
+    if storage.get("InputFormat"):
+        parameters["inputformat"] = storage["InputFormat"]
+    if storage.get("OutputFormat"):
+        parameters["outputformat"] = storage["OutputFormat"]
+    serde = storage.get("SerdeInfo") or {}
+    if serde.get("SerializationLibrary"):
+        parameters["serde.serialization.lib"] = serde["SerializationLibrary"]
+    for key, value in (serde.get("Parameters") or {}).items():
+        parameters[f"serde.param.{key}"] = value
+    return parameters
+
+
+def glue_table_columns(
+    table: dict[str, Any], read_object: Callable[[str], bytes]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A Glue table's columns and partition keys; an Iceberg table that Glue holds no columns for is read from its metadata."""
+    columns = list((table.get("StorageDescriptor") or {}).get("Columns") or [])
+    parameters = table.get("Parameters") or {}
+    location = parameters.get("metadata_location")
+    if (
+        not columns
+        and location
+        and parameters.get("table_type", "").upper() == "ICEBERG"
+    ):
+        metadata = json.loads(read_object(location))
+        schema_id = metadata.get("current-schema-id", 0)
+        schemas = metadata.get("schemas") or [metadata.get("schema")]
+        schema = next(
+            (s for s in schemas if s.get("schema-id", 0) == schema_id), schemas[-1]
+        )
+        columns = [
+            {"Name": f["name"], "Type": _iceberg_json_type(f["type"])}
+            for f in schema["fields"]
+        ]
+    columns = [
+        {k: v for k, v in c.items() if k in ("Name", "Type", "Comment")}
+        for c in columns
+    ]
+    partition_keys = [
+        {k: v for k, v in c.items() if k in ("Name", "Type", "Comment")}
+        for c in table.get("PartitionKeys") or []
+    ]
+    return columns, partition_keys
+
+
+def _iceberg_json_type(iceberg_type: Any) -> str:
+    if isinstance(iceberg_type, dict):
+        if iceberg_type["type"] == "list":
+            return f"array<{_iceberg_json_type(iceberg_type['element'])}>"
+        if iceberg_type["type"] == "map":
+            key = _iceberg_json_type(iceberg_type["key"])
+            return f"map<{key},{_iceberg_json_type(iceberg_type['value'])}>"
+        fields = [
+            f"{f['name']}:{_iceberg_json_type(f['type'])}"
+            for f in iceberg_type["fields"]
+        ]
+        return f"struct<{','.join(fields)}>"
+    names = {
+        "long": "bigint",
+        "timestamptz": "timestamp with time zone",
+        "uuid": "string",
+    }
+    return names.get(iceberg_type, iceberg_type.replace(" ", ""))
 
 
 athena_backends = BackendDict(AthenaBackend, "athena")
