@@ -337,13 +337,33 @@ class S3TablesResponse(BaseResponse):
             return 404, {"Content-Type": "application/json"}, json.dumps(
                 {"error": {"message": f"Table bucket does not exist: {warehouse}", "type": "NoSuchWarehouseException", "code": 404}}
             )
-        reader = iceberg_rest.s3_reader(response.current_account, get_partition(response.region))
-        return iceberg_rest.handle(request.method, path, _S3TablesIcebergCatalog(bucket), reader)
+        partition = get_partition(response.region)
+        reader = iceberg_rest.s3_reader(response.current_account, partition)
+        writer = iceberg_rest.s3_writer(response.current_account, partition)
+        catalog = _S3TablesIcebergCatalog(response.s3tables_backend, bucket)
+        return iceberg_rest.handle(request.method, path, catalog, reader, writer, response.body)
 
 
 class _S3TablesIcebergCatalog:
-    def __init__(self, bucket: Any):
+    def __init__(self, backend: Any, bucket: Any):
+        self.backend = backend
         self.bucket = bucket
+
+    def create_namespace(self, namespace: str, properties: dict[str, str]) -> None:
+        self.backend.create_namespace(self.bucket.arn, namespace)
+
+    def default_location(self, namespace: str, table: str) -> str | None:
+        # S3 Tables places each table in its own storage; create it to know where
+        ns = self.bucket.namespaces[namespace]
+        if table not in ns.tables:
+            self.backend.create_table(self.bucket.arn, namespace, table, "ICEBERG")
+        return ns.tables[table].warehouse_location
+
+    def register(self, namespace: str, table: str, metadata_location: str, previous: str | None) -> None:
+        t = self.bucket.namespaces[namespace].tables.get(table)
+        if t is None:
+            t = self.backend.create_table(self.bucket.arn, namespace, table, "ICEBERG")
+        self.backend.update_table_metadata_location(self.bucket.arn, namespace, table, t.version_token, metadata_location)
 
     def namespaces(self) -> list[str]:
         return list(self.bucket.namespaces)

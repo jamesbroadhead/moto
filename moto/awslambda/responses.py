@@ -354,6 +354,13 @@ class LambdaResponse(BaseResponse):
         self.backend.delete_layer_version(layer_name, layer_version)
         return "{}"
 
+    def get_layer_version_by_arn(self) -> str:
+        arn = self.querystring.get("Arn", [None])[0] or self._get_param("Arn")
+        layer_version = self.backend.layers_versions_by_arn(arn)
+        if layer_version is None:
+            raise UnknownLayerVersionException([arn])
+        return json.dumps(layer_version.get_layer_version())
+
     def get_layer_version(self) -> str:
         layer_name = unquote(self.path.split("/")[-3])
         layer_version = self.path.split("/")[-1]

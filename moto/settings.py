@@ -136,6 +136,9 @@ def moto_proxy_port() -> str:
 
 @lru_cache
 def moto_server_host() -> str:
+    # Where functions reach moto, e.g. for custom resource responses
+    if os.environ.get("MOTO_HOST"):
+        return os.environ["MOTO_HOST"]
     if is_docker():
         return get_docker_host()
     else:

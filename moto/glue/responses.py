@@ -1205,8 +1205,10 @@ class GlueResponse(BaseResponse):
         backend = response.glue_backend
         catalog = _GlueIcebergCatalog(backend)
         path = full_url.split("/iceberg/v1/", 1)[1].split("?", 1)[0]
-        reader = iceberg_rest.s3_reader(response.current_account, get_partition(response.region))
-        return iceberg_rest.handle(request.method, path, catalog, reader)
+        partition = get_partition(response.region)
+        reader = iceberg_rest.s3_reader(response.current_account, partition)
+        writer = iceberg_rest.s3_writer(response.current_account, partition)
+        return iceberg_rest.handle(request.method, path, catalog, reader, writer, response.body)
 
 
 class _GlueIcebergCatalog:
@@ -1227,3 +1229,24 @@ class _GlueIcebergCatalog:
         except Exception:
             return None
         return params.get("metadata_location")
+
+    def create_namespace(self, namespace: str, properties: dict[str, str]) -> None:
+        database_input: dict[str, Any] = {"Name": namespace, "Parameters": properties}
+        if "location" in properties:
+            database_input["LocationUri"] = properties["location"]
+        self.backend.create_database(namespace, database_input)
+
+    def default_location(self, namespace: str, table: str) -> str | None:
+        location = self.backend.get_database(namespace).input.get("LocationUri")
+        return f"{location.rstrip('/')}/{table}" if location else None
+
+    def register(self, namespace: str, table: str, metadata_location: str, previous: str | None) -> None:
+        parameters = {"table_type": "ICEBERG", "metadata_location": metadata_location}
+        if previous is None:
+            table_input = {"Name": table, "TableType": "EXTERNAL_TABLE", "Parameters": parameters}
+            self.backend.create_table(namespace, table, table_input)
+        else:
+            current = self.backend.get_table(namespace, table).as_dict()
+            table_input = {k: v for k, v in current.items() if k in ("Name", "TableType", "StorageDescriptor", "Description")}
+            table_input["Parameters"] = {**current.get("Parameters", {}), **parameters, "previous_metadata_location": previous}
+            self.backend.update_table(namespace, table, table_input)
