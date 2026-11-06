@@ -8,7 +8,7 @@ from typing import Any
 
 from moto import settings
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel
+from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.utils import utcnow
 from moto.moto_api._internal import mock_random
@@ -1841,7 +1841,7 @@ class FakeSecurityConfiguration(BaseModel):
         }
 
 
-class FakeDatabase(BaseModel):
+class FakeDatabase(CloudFormationModel):
     def __init__(
         self, database_name: str, database_input: dict[str, Any], catalog_id: str
     ):
@@ -1850,6 +1850,28 @@ class FakeDatabase(BaseModel):
         self.catalog_id = catalog_id
         self.created_time = utcnow()
         self.tables: dict[str, FakeTable] = OrderedDict()
+
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::Glue::Database"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "FakeDatabase":
+        database_input = dict(cloudformation_json["Properties"].get("DatabaseInput", {}))
+        name = database_input.setdefault("Name", resource_name)
+        return glue_backends[account_id][region_name].create_database(name, database_input)
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1866,7 +1888,7 @@ class FakeDatabase(BaseModel):
         }
 
 
-class FakeTable(BaseModel):
+class FakeTable(CloudFormationModel):
     def __init__(
         self,
         database_name: str,
@@ -1889,6 +1911,32 @@ class FakeTable(BaseModel):
         self.versions: dict[str, dict[str, Any]] = {
             str(self._current_version): table_input
         }
+
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::Glue::Table"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "FakeTable":
+        props = cloudformation_json["Properties"]
+        table_input = dict(props.get("TableInput", {}))
+        name = table_input.setdefault("Name", resource_name)
+        open_table_format = props.get("OpenTableFormatInput")
+        return glue_backends[account_id][region_name].create_table(
+            props["DatabaseName"], name, table_input, open_table_format
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
 
     def update(
         self,
@@ -2163,7 +2211,7 @@ class FakeCrawl(ManagedState):
             self.end_time = utcnow()
 
 
-class FakeJob:
+class FakeJob(CloudFormationModel):
     def __init__(
         self,
         name: str,
@@ -2218,6 +2266,57 @@ class FakeJob:
         self.backend.tag_resource(self.arn, tags)
 
         self.job_runs: list[FakeJobRun] = []
+
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::Glue::Job"
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "FakeJob":
+        p = cloudformation_json["Properties"]
+        backend = glue_backends[account_id][region_name]
+        name = p.get("Name", resource_name)
+        backend.create_job(
+            name=name,
+            role=p.get("Role"),  # type: ignore[arg-type]
+            command=p.get("Command"),  # type: ignore[arg-type]
+            description=p.get("Description"),  # type: ignore[arg-type]
+            log_uri=p.get("LogUri"),  # type: ignore[arg-type]
+            execution_property=p.get("ExecutionProperty") or {},
+            default_arguments=p.get("DefaultArguments") or {},
+            non_overridable_arguments=p.get("NonOverridableArguments") or {},
+            connections=p.get("Connections") or {},
+            max_retries=p.get("MaxRetries"),  # type: ignore[arg-type]
+            allocated_capacity=p.get("AllocatedCapacity"),  # type: ignore[arg-type]
+            timeout=p.get("Timeout"),  # type: ignore[arg-type]
+            max_capacity=p.get("MaxCapacity"),  # type: ignore[arg-type]
+            security_configuration=p.get("SecurityConfiguration"),  # type: ignore[arg-type]
+            tags=p.get("Tags") or {},
+            notification_property=p.get("NotificationProperty"),  # type: ignore[arg-type]
+            glue_version=p.get("GlueVersion"),  # type: ignore[arg-type]
+            number_of_workers=p.get("NumberOfWorkers"),  # type: ignore[arg-type]
+            worker_type=p.get("WorkerType"),  # type: ignore[arg-type]
+            code_gen_configuration_nodes=None,  # type: ignore[arg-type]
+            execution_class=p.get("ExecutionClass"),  # type: ignore[arg-type]
+            source_control_details=None,  # type: ignore[arg-type]
+        )
+        return backend.jobs[name]
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
 
     def get_name(self) -> str:
         return self.name

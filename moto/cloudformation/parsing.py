@@ -40,6 +40,7 @@ from moto.elb import models as elb_models  # noqa
 from moto.elbv2 import models as elbv2_models  # noqa
 from moto.emr import models as emr_models  # noqa
 from moto.events import models as events_models  # noqa
+from moto.glue import models as glue_models  # noqa
 from moto.iam import models as iam_models  # noqa
 from moto.iot import models as iot_models  # noqa
 from moto.kinesis import models as kinesis_models  # noqa
