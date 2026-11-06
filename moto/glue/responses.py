@@ -89,8 +89,9 @@ class GlueResponse(BaseResponse):
         table_input = self._get_param("TableInput")
         table_name = table_input.get("Name")
         version_id = self._get_param("VersionId")
+        skip_archive = self._get_param("SkipArchive", False)
         self.glue_backend.update_table(
-            database_name, table_name, table_input, version_id
+            database_name, table_name, table_input, version_id, skip_archive
         )
         return EmptyResult()
 
