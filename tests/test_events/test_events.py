@@ -108,6 +108,28 @@ def test_put_rule():
 
 
 @mock_aws
+def test_put_rule_rejects_oversized_pattern_without_changing_rule():
+    client = boto3.client("events", "us-west-2")
+    name = "pattern-size-limit"
+    pattern = json.dumps({"source": ["x" * (2048 - len('{"source": [""]}'))]})
+    client.put_rule(Name=name, EventPattern=pattern)
+    assert client.describe_rule(Name=name)["EventPattern"] == pattern
+
+    oversized_pattern = pattern.replace('"x', '"xx', 1)
+    for rule_name in [name, "new-rule"]:
+        with pytest.raises(ClientError) as exc:
+            client.put_rule(Name=rule_name, EventPattern=oversized_pattern)
+        assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert exc.value.response["Error"] == {
+            "Code": "InvalidEventPatternException",
+            "Message": f"Parameter EventPattern for rule {rule_name} exceeds limit of 2048",
+        }
+
+    assert client.describe_rule(Name=name)["EventPattern"] == pattern
+    assert [rule["Name"] for rule in client.list_rules()["Rules"]] == [name]
+
+
+@mock_aws
 def test_put_rule__where_event_bus_name_is_arn():
     client = boto3.client("events", "us-west-2")
     event_bus_name = "test-bus"

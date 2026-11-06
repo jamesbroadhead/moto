@@ -1287,6 +1287,12 @@ class EventsBackend(BaseBackend, TaggableResourcesMixin):
         managed_by: str | None = None,
         tags: list[dict[str, str]] | None = None,
     ) -> Rule:
+        # Default account quota: https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-quota.html
+        if event_pattern and len(event_pattern) > 2048:
+            raise JsonRESTError(
+                "InvalidEventPatternException",
+                f"Parameter EventPattern for rule {name} exceeds limit of 2048",
+            )
         event_bus_name = self._normalize_event_bus_arn(event_bus_arn)
 
         if not event_pattern and not scheduled_expression:
