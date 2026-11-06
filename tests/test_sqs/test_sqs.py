@@ -3643,6 +3643,8 @@ def test_queue_attributes_are_not_recalculated_when_sending_messages():
             "ApproximateNumberOfMessages": "3",
             "ContentBasedDeduplication": "true",
         }
+        assert calls == []
+        client.get_queue_attributes(QueueUrl=fifo_url, AttributeNames=["All"])
         assert len(calls) == 1
 
 

@@ -518,26 +518,28 @@ class Queue(CloudFormationModel):
 
     @property
     def attributes(self) -> dict[str, Any]:  # type: ignore[misc]
+        return self.get_attributes(
+            self.BASE_ATTRIBUTES + self.FIFO_ATTRIBUTES + self.KMS_ATTRIBUTES
+        )
+
+    def get_attributes(self, attribute_names: list[str]) -> dict[str, Any]:
         result: dict[str, Any] = {}
-
-        for attribute in self.BASE_ATTRIBUTES:
-            attr = getattr(self, camelcase_to_underscores(attribute))
-            result[attribute] = attr
-
+        supported_attributes = self.BASE_ATTRIBUTES.copy()
         if self.fifo_queue:
-            for attribute in self.FIFO_ATTRIBUTES:
-                attr = getattr(self, camelcase_to_underscores(attribute))
-                result[attribute] = attr
-
+            supported_attributes.extend(self.FIFO_ATTRIBUTES)
         if self.kms_master_key_id:  # type: ignore
-            for attribute in self.KMS_ATTRIBUTES:
+            supported_attributes.extend(self.KMS_ATTRIBUTES)
+
+        # Message counters scan the backlog, so evaluate only requested attributes.
+        for attribute in supported_attributes:
+            if attribute in attribute_names:
                 attr = getattr(self, camelcase_to_underscores(attribute))
                 result[attribute] = attr
 
-        if self.policy:
+        if "Policy" in attribute_names and self.policy:
             result["Policy"] = self.policy
 
-        if self.redrive_policy:
+        if "RedrivePolicy" in attribute_names and self.redrive_policy:
             result["RedrivePolicy"] = json.dumps(self.redrive_policy)
 
         for key in result:
@@ -787,11 +789,11 @@ class SQSBackend(BaseBackend, TaggableResourcesMixin):
             raise InvalidAttributeName(invalid_name)
 
         attributes = {}
-        queue_attributes = queue.attributes
 
         if "All" in attribute_names:
-            attributes = queue_attributes
+            attributes = queue.attributes
         else:
+            queue_attributes = queue.get_attributes(attribute_names)
             for name in attribute_names:
                 if queue_attributes.get(name) is not None:
                     attributes[name] = queue_attributes[name]
