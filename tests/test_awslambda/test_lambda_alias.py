@@ -21,6 +21,93 @@ from .utilities import (
 
 
 @mock_aws
+@pytest.mark.parametrize(
+    "name_format", ["name", "arn", "qualified_name", "qualified_arn"]
+)
+@pytest.mark.parametrize("weighted", [False, True])
+def test_delete_version_referenced_by_alias(name_format, weighted):
+    client = boto3.client("lambda", region_name="us-east-1")
+    function_name = "alias-version-deletion"
+    function = client.create_function(
+        FunctionName=function_name,
+        Runtime=PYTHON_VERSION,
+        Role=get_role_name(),
+        Handler="lambda_function.lambda_handler",
+        Code={"ZipFile": get_test_zip_file1()},
+        Publish=True,
+    )
+    first_version = function["Version"]
+    client.update_function_code(
+        FunctionName=function_name, ZipFile=get_test_zip_file2()
+    )
+    second_version = client.publish_version(FunctionName=function_name)["Version"]
+    client.create_alias(
+        FunctionName=function_name,
+        Name="Live",
+        FunctionVersion=first_version,
+        **(
+            {"RoutingConfig": {"AdditionalVersionWeights": {second_version: 0.5}}}
+            if weighted
+            else {}
+        ),
+    )
+    protected_version = second_version if weighted else first_version
+    arn = f"arn:aws:lambda:us-east-1:{ACCOUNT_ID}:function:{function_name}"
+    identifier = arn if "arn" in name_format else function_name
+    if name_format.startswith("qualified"):
+        delete_params = {"FunctionName": f"{identifier}:{protected_version}"}
+    else:
+        delete_params = {"FunctionName": identifier, "Qualifier": protected_version}
+
+    with pytest.raises(ClientError) as exc:
+        client.delete_function(**delete_params)
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
+    assert exc.value.response["Error"]["Code"] == "ResourceConflictException"
+    assert "referenced by one or more aliases" in exc.value.response["Error"]["Message"]
+    assert (
+        client.get_function(FunctionName=function_name, Qualifier=protected_version)[
+            "Configuration"
+        ]["Version"]
+        == protected_version
+    )
+    assert (
+        client.get_alias(FunctionName=function_name, Name="Live")["FunctionVersion"]
+        == first_version
+    )
+
+    if not weighted:
+        client.delete_function(FunctionName=function_name, Qualifier=second_version)
+        assert (
+            client.get_alias(FunctionName=function_name, Name="Live")["FunctionVersion"]
+            == first_version
+        )
+
+    client.delete_alias(FunctionName=function_name, Name="Live")
+    client.delete_function(**delete_params)
+    versions = client.list_versions_by_function(FunctionName=function_name)["Versions"]
+    assert protected_version not in [version["Version"] for version in versions]
+
+
+@mock_aws
+def test_delete_entire_function_with_alias():
+    client = boto3.client("lambda", region_name="us-east-1")
+    function_name = "delete-function-with-alias"
+    function = client.create_function(
+        FunctionName=function_name,
+        Runtime=PYTHON_VERSION,
+        Role=get_role_name(),
+        Handler="lambda_function.lambda_handler",
+        Code={"ZipFile": get_test_zip_file1()},
+        Publish=True,
+    )
+    client.create_alias(
+        FunctionName=function_name, Name="Live", FunctionVersion=function["Version"]
+    )
+    client.delete_function(FunctionName=function_name)
+    assert client.list_functions()["Functions"] == []
+
+
+@mock_aws
 def test_create_alias():
     client = boto3.client("lambda", region_name="ap-southeast-1")
     function_name = str(uuid4())[0:6]

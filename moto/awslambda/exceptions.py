@@ -23,6 +23,13 @@ class FunctionAlreadyExists(LambdaClientError):
         super().__init__("ResourceConflictException", message)
 
 
+class ResourceConflictException(LambdaClientError):
+    code = 409
+
+    def __init__(self, message: str) -> None:
+        super().__init__("ResourceConflictException", message)
+
+
 class InvalidParameterValueException(LambdaClientError):
     def __init__(self, message: str):
         super().__init__("InvalidParameterValueException", message)
