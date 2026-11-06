@@ -492,6 +492,11 @@ class LayerVersion(CloudFormationModel):
             )
         raise ValueError("Layer version is not set")
 
+    @property
+    def physical_resource_id(self) -> str:
+        # Ref returns the layer version ARN
+        return self.arn
+
     def attach(self, layer: Layer, version: int) -> None:
         self._attached = True
         self._layer = layer
@@ -536,12 +541,17 @@ class LayerVersion(CloudFormationModel):
         **kwargs: Any,
     ) -> LayerVersion:
         properties = cloudformation_json["Properties"]
-        optional_properties = ("Description", "CompatibleRuntimes", "LicenseInfo")
+        optional_properties = (
+            "Description",
+            "CompatibleRuntimes",
+            "CompatibleArchitectures",
+            "LicenseInfo",
+        )
 
         # required
         spec = {
             "Content": properties["Content"],
-            "LayerName": resource_name,
+            "LayerName": properties.get("LayerName", resource_name),
         }
         for prop in optional_properties:
             if prop in properties:
@@ -776,6 +786,8 @@ class LambdaFunction(CloudFormationModel, DockerModel):
 
     @ephemeral_storage.setter
     def ephemeral_storage(self, ephemeral_storage: int) -> None:
+        # CloudFormation passes parameter values as strings
+        ephemeral_storage = int(ephemeral_storage)
         if ephemeral_storage > 10240:
             raise ValidationException(
                 str(ephemeral_storage),
@@ -804,17 +816,17 @@ class LambdaFunction(CloudFormationModel, DockerModel):
 
     def _get_layers_data(self, layers_versions_arns: list[str]) -> list[LayerDataType]:
         backend = get_backend(self.account_id, self.region)
-        layer_versions = [
-            backend.layers_versions_by_arn(layer_version)
-            for layer_version in layers_versions_arns
-        ]
-        if not all(layer_versions):
-            raise UnknownLayerVersionException(layers_versions_arns)
-        # The `if lv` part is not necessary - we know there are no None's, because of the `all()`-check earlier
-        # But MyPy does not seem to understand this
-        return [
-            {"Arn": lv.arn, "CodeSize": lv.code_size} for lv in layer_versions if lv
-        ]
+        result: list[LayerDataType] = []
+        for arn in layers_versions_arns:
+            lv = backend.layers_versions_by_arn(arn)
+            if lv is not None:
+                result.append({"Arn": lv.arn, "CodeSize": lv.code_size})
+            elif arn.split(":")[4:5] != [self.account_id]:
+                # Public or shared layers of other accounts, e.g. AWS Powertools, are not known to moto
+                result.append({"Arn": arn, "CodeSize": 0})
+            else:
+                raise UnknownLayerVersionException(layers_versions_arns)
+        return result
 
     def get_function_code_signing_config(self) -> dict[str, Any]:
         return {
@@ -1261,6 +1273,11 @@ class LambdaFunction(CloudFormationModel, DockerModel):
             "VpcConfig",
             "Environment",
             "ReservedConcurrentExecutions",
+            "Layers",
+            "Architectures",
+            "PackageType",
+            "TracingConfig",
+            "EphemeralStorage",
         )
 
         # required
