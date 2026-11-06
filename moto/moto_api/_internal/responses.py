@@ -151,6 +151,18 @@ class MotoAPIResponse(BaseResponse):
         mock_random.seed(int(a))
         return 200, {}, ""
 
+    def set_bedrock_converse_result(
+        self, request: Any, full_url: str, headers: Any
+    ) -> TYPE_RESPONSE:
+        from moto.bedrockruntime.models import bedrockruntime_backends
+
+        body = self._get_body(headers, request)
+        backend = bedrockruntime_backends[body.get("account_id", DEFAULT_ACCOUNT_ID)][
+            body.get("region", "us-east-1")
+        ]
+        backend.converse_results.extend(body.get("results", []))
+        return 201, {}, ""
+
     def set_athena_result(
         self,
         request: Any,
