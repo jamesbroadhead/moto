@@ -431,9 +431,10 @@ class GlueBackend(BaseBackend, TaggableResourcesMixin):
         table_name: str,
         table_input: dict[str, Any],
         version_id: str | None = None,
+        skip_archive: bool = False,
     ) -> None:
         table = self.get_table(database_name, table_name)
-        table.update(table_input, version_id)
+        table.update(table_input, version_id, skip_archive)
 
     def get_table_version(
         self, database_name: str, table_name: str, ver_id: str
@@ -1889,12 +1890,17 @@ class FakeTable(BaseModel):
         }
 
     def update(
-        self, table_input: dict[str, Any], version_id: str | None = None
+        self,
+        table_input: dict[str, Any],
+        version_id: str | None = None,
+        skip_archive: bool = False,
     ) -> None:
         # The version check and write must be atomic across server request threads.
         with self._update_lock:
             if version_id is not None and version_id != str(self._current_version):
                 raise ConcurrentModificationException()
+            if skip_archive:
+                self.versions.pop(str(self._current_version), None)
             self.versions[str(self._current_version + 1)] = table_input
             self._current_version += 1
             self.updated_time = utcnow()
