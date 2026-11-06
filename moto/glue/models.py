@@ -6,6 +6,7 @@ from datetime import datetime
 from threading import Lock
 from typing import Any
 
+from moto import settings
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
@@ -2286,6 +2287,8 @@ class FakeJob:
             job_run_id=previous_run_id,
         )
         self.job_runs.append(fake_job_run)
+        if settings.glue_job_run_endpoint():
+            fake_job_run.run_externally(self.command)
         return fake_job_run.job_run_id
 
     def get_job_run(self, run_id: str) -> "FakeJobRun":
@@ -2338,6 +2341,45 @@ class FakeJobRun(ManagedState):
     def get_name(self) -> str:
         return self.job_name
 
+    @property
+    def status(self) -> str:  # type: ignore[override]
+        if getattr(self, "external_state", None):
+            return self.external_state  # type: ignore[return-value]
+        return ManagedState.status.fget(self)  # type: ignore[attr-defined]
+
+    @status.setter
+    def status(self, value: str) -> None:
+        ManagedState.status.fset(self, value)  # type: ignore[attr-defined]
+
+    def run_externally(self, command: dict[str, Any] | None) -> None:
+        """Hands the run to MOTO_GLUE_JOB_RUN_ENDPOINT; the run is RUNNING until it answers."""
+        import threading
+
+        import requests
+
+        self.external_state = "RUNNING"
+        self.error_message: str | None = None
+        body = {
+            "JobName": self.job_name,
+            "JobRunId": self.job_run_id,
+            "Arguments": self.arguments or {},
+            "Command": command or {},
+        }
+
+        def run() -> None:
+            try:
+                resp = requests.post(settings.glue_job_run_endpoint(), json=body, timeout=3600)  # type: ignore[arg-type]
+                result = resp.json() if resp.content else {}
+                ok = resp.status_code < 300 and result.get("JobRunState", "SUCCEEDED") == "SUCCEEDED"
+                self.error_message = None if ok else result.get("ErrorMessage") or resp.text[:2000]
+                self.external_state = "SUCCEEDED" if ok else "FAILED"
+            except Exception as e:  # the runner is gone: the run fails, as a crashed job would
+                self.error_message = str(e)
+                self.external_state = "FAILED"
+            self.completed_on = utcnow()
+
+        threading.Thread(target=run, daemon=True).start()
+
     def as_dict(self) -> dict[str, Any]:
         return_dict = {
             "Id": self.job_run_id,
@@ -2366,6 +2408,8 @@ class FakeJobRun(ManagedState):
             return_dict["Timeout"] = self.timeout
         if self.previous_run_id:
             return_dict["PreviousRunId"] = self.previous_run_id
+        if getattr(self, "error_message", None):
+            return_dict["ErrorMessage"] = self.error_message
         return return_dict
 
 

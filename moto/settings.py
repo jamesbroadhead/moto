@@ -119,6 +119,11 @@ def lambda_event_source_mappings_disabled() -> bool:
     return os.environ.get("MOTO_LAMBDA_EVENT_SOURCE_MAPPINGS_DISABLED", "false").lower() == "true"
 
 
+def glue_job_run_endpoint() -> str | None:
+    """URL that runs Glue job runs: moto POSTs each new run there and records the outcome."""
+    return os.environ.get("MOTO_GLUE_JOB_RUN_ENDPOINT") or None
+
+
 def lambda_stub_ecr() -> bool:
     # Whether to stub or mock ecr backend when deploying image based lambdas.
     # True => don't requiring image presence in moto ecr backend for `create_function`.
