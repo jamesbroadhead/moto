@@ -512,7 +512,10 @@ class Table(CloudFormationModel):
 
     def __len__(self) -> int:
         return sum(
-            [(len(value) if self.has_range_key else 1) for value in self.items.values()]
+            [
+                (len(value) if self.has_range_key else 1)
+                for value in list(self.items.values())
+            ]
         )
 
     @property
@@ -996,9 +999,10 @@ class Table(CloudFormationModel):
 
     def all_items(self) -> list[Item]:
         items: list[Item] = []
-        for hash_set in self.items.values():
+        # Writers may add/remove partitions and sort keys while a read is enumerating.
+        for hash_set in list(self.items.values()):
             if self.range_key_attr:
-                for item in hash_set.values():
+                for item in list(hash_set.values()):
                     items.append(item)
             else:
                 items.append(hash_set)  # type: ignore
@@ -1025,9 +1029,9 @@ class Table(CloudFormationModel):
 
         items: list[Item] = []
 
-        for hash_set in self.items.values():
+        for hash_set in list(self.items.values()):
             if self.range_key_attr:
-                for item in hash_set.values():
+                for item in list(hash_set.values()):
                     if idx_col_set.issubset(set(item.attrs)):
                         items.append(item)
             else:
