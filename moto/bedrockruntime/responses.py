@@ -21,6 +21,13 @@ class BedrockRuntimeResponse(BaseResponse):
         """Return backend instance specific for this region."""
         return bedrockruntime_backends[self.current_account][self.region]
 
+    def converse(self) -> ActionResult:
+        return ActionResult(
+            self.bedrockruntime_backend.converse(
+                self._get_param("modelId"), self._get_params()
+            )
+        )
+
     def invoke_model(self) -> ActionResult:
         payload = self._get_param("body")
         content_type = self._get_param("contentType", APPLICATION_JSON)

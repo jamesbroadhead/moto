@@ -17,7 +17,7 @@ bedrock-runtime
 |start-h3| Implemented features for this service |end-h3|
 
 - [ ] apply_guardrail
-- [ ] converse
+- [X] converse
 - [ ] converse_stream
 - [ ] count_tokens
 - [ ] get_async_invoke
