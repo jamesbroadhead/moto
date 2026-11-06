@@ -40,7 +40,7 @@ logs
 - [X] delete_log_stream
 - [ ] delete_lookup_table
 - [X] delete_metric_filter
-- [ ] delete_query_definition
+- [X] delete_query_definition
 - [X] delete_resource_policy
   
 Remove resource policy with a policy name matching given name.
@@ -75,7 +75,7 @@ Pagination is not yet implemented
 Pagination is not yet implemented
 
 
-- [ ] describe_query_definitions
+- [X] describe_query_definitions
 - [X] describe_resource_policies
   
 Return list of resource policies.
@@ -144,7 +144,7 @@ The SequenceToken-parameter is not yet implemented
 
 - [ ] put_log_group_deletion_protection
 - [X] put_metric_filter
-- [ ] put_query_definition
+- [X] put_query_definition
 - [X] put_resource_policy
   
 Creates/updates resource policy and return policy object

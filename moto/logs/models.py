@@ -1,5 +1,6 @@
 import re
 from collections.abc import Iterable, Iterator
+from copy import deepcopy
 from datetime import datetime, timedelta
 from gzip import compress as gzip_compress
 from typing import Any
@@ -927,6 +928,21 @@ class Delivery(BaseModel):
         return dct_items
 
 
+class QueryDefinition(BaseModel):
+    def __init__(self, query_id: str, parameters: dict[str, Any]):
+        self.query_definition_id = query_id
+        self.name: str = parameters["name"]
+        self.query_language: str = parameters["queryLanguage"]
+        self.definition = {
+            **parameters,
+            "queryDefinitionId": query_id,
+            "lastModified": int(unix_time_millis()),
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        return self.definition
+
+
 class LogsBackend(BaseBackend, TaggableResourcesMixin):
     SERVICE_NAMESPACE = "logs"
 
@@ -935,6 +951,8 @@ class LogsBackend(BaseBackend, TaggableResourcesMixin):
         self.groups: dict[str, LogGroup] = {}
         self.filters = MetricFilters()
         self.queries: dict[str, LogQuery] = {}
+        self.query_definitions: dict[str, QueryDefinition] = {}
+        self.query_definition_tokens: dict[str, tuple[dict[str, Any], str]] = {}
         self.resource_policies: dict[str, LogResourcePolicy] = {}
         self.destinations: dict[str, Destination] = {}
         self.tagger = TaggingService()
@@ -1440,6 +1458,59 @@ class LogsBackend(BaseBackend, TaggableResourcesMixin):
             raise ResourceNotFoundException()
 
         log_group.delete_subscription_filter(filter_name)
+
+    def put_query_definition(self, parameters: dict[str, Any]) -> str:
+        parameters = deepcopy(parameters)
+        token = parameters.pop("clientToken", None)
+        language = parameters.setdefault("queryLanguage", "CWLI")
+        if language not in ("CWLI", "SQL", "PPL"):
+            raise InvalidParameterException("queryLanguage must be CWLI, SQL or PPL")
+        if parameters.get("parameters") and language != "CWLI":
+            raise InvalidParameterException(
+                "Query parameters are supported only for CWLI"
+            )
+        if language == "SQL" and parameters.get("logGroupNames"):
+            raise InvalidParameterException(
+                "SQL queries specify log groups in queryString"
+            )
+        if token in self.query_definition_tokens:
+            previous, query_id = self.query_definition_tokens[token]
+            if previous != parameters:
+                raise InvalidParameterException(
+                    "clientToken was already used for a different request"
+                )
+            return query_id
+        existing_id = parameters.get("queryDefinitionId")
+        if existing_id is not None and existing_id not in self.query_definitions:
+            raise ResourceNotFoundException(
+                "The specified query definition does not exist"
+            )
+        query_id = existing_id or str(mock_random.uuid4())
+        self.query_definitions[query_id] = QueryDefinition(query_id, parameters)
+        if token:
+            self.query_definition_tokens[token] = (parameters, query_id)
+        return query_id
+
+    @paginate(pagination_model=PAGINATION_MODEL)
+    def describe_query_definitions(
+        self, name_prefix: str | None = None, query_language: str | None = None
+    ) -> list[QueryDefinition]:
+        if query_language is not None and query_language not in ("CWLI", "SQL", "PPL"):
+            raise InvalidParameterException("queryLanguage must be CWLI, SQL or PPL")
+        return [
+            definition
+            for definition in self.query_definitions.values()
+            if definition.name.startswith(name_prefix or "")
+            and (query_language is None or definition.query_language == query_language)
+        ]
+
+    def delete_query_definition(self, query_id: str) -> bool:
+        if query_id not in self.query_definitions:
+            raise ResourceNotFoundException(
+                "The specified query definition does not exist"
+            )
+        del self.query_definitions[query_id]
+        return True
 
     def start_query(
         self,
