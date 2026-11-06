@@ -21,6 +21,10 @@ class ResourceNotFound(CloudWatchException):
     code = "ResourceNotFound"
 
 
+class ResourceConflict(CloudWatchException):
+    code = "ResourceConflict"
+
+
 class ResourceNotFoundException(CloudWatchException):
     code = "ResourceNotFoundException"
     message = "Unknown"
