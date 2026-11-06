@@ -3,6 +3,7 @@ import re
 from collections import OrderedDict
 from collections.abc import Iterator
 from datetime import datetime
+from threading import Lock
 from typing import Any
 
 from moto.core.base_backend import BackendDict, BaseBackend
@@ -17,6 +18,7 @@ from ..utilities.paginator import paginate
 from ..utilities.tagging_service import TaggingService
 from .exceptions import (
     AlreadyExistsException,
+    ConcurrentModificationException,
     ConcurrentRunsExceededException,
     CrawlerAlreadyExistsException,
     CrawlerNotFoundException,
@@ -424,10 +426,14 @@ class GlueBackend(BaseBackend, TaggableResourcesMixin):
             raise TableNotFoundException(table_name)
 
     def update_table(
-        self, database_name: str, table_name: str, table_input: dict[str, Any]
+        self,
+        database_name: str,
+        table_name: str,
+        table_input: dict[str, Any],
+        version_id: str | None = None,
     ) -> None:
         table = self.get_table(database_name, table_name)
-        table.update(table_input)
+        table.update(table_input, version_id)
 
     def get_table_version(
         self, database_name: str, table_name: str, ver_id: str
@@ -1874,6 +1880,7 @@ class FakeTable(BaseModel):
         self.created_time = utcnow()
         self.updated_time: datetime | None = None
         self._current_version = 1
+        self._update_lock = Lock()
         if open_table_format_input and "IcebergInput" in open_table_format_input:
             table_input.setdefault("Parameters", {})
             table_input["Parameters"]["table_type"] = "ICEBERG"
@@ -1881,10 +1888,16 @@ class FakeTable(BaseModel):
             str(self._current_version): table_input
         }
 
-    def update(self, table_input: dict[str, Any]) -> None:
-        self.versions[str(self._current_version + 1)] = table_input
-        self._current_version += 1
-        self.updated_time = utcnow()
+    def update(
+        self, table_input: dict[str, Any], version_id: str | None = None
+    ) -> None:
+        # The version check and write must be atomic across server request threads.
+        with self._update_lock:
+            if version_id is not None and version_id != str(self._current_version):
+                raise ConcurrentModificationException()
+            self.versions[str(self._current_version + 1)] = table_input
+            self._current_version += 1
+            self.updated_time = utcnow()
 
     def get_version(self, ver: str) -> dict[str, Any]:
         try:
