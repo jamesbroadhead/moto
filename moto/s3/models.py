@@ -1021,6 +1021,46 @@ class Notification(BaseModel):
         return data
 
 
+def cfn_to_api_notification(cfn: dict[str, Any]) -> dict[str, Any]:
+    """A bucket's CloudFormation NotificationConfiguration, in the shape PutBucketNotificationConfiguration parses."""
+
+    def targets(cfn_key: str, target: str, api_target: str) -> list[dict[str, Any]]:
+        out = []
+        for c in cfn.get(cfn_key) or []:
+            rules = ((c.get("Filter") or {}).get("S3Key") or {}).get("Rules") or []
+            out.append(
+                {
+                    api_target: c[target],
+                    "Event": [c["Event"]],
+                    "Filter": {
+                        "S3Key": {
+                            "FilterRule": [
+                                {"Name": r["Name"].lower(), "Value": r["Value"]}
+                                for r in rules
+                            ]
+                        }
+                    }
+                    if rules
+                    else None,
+                }
+            )
+        return out
+
+    config: dict[str, Any] = {
+        "TopicConfiguration": targets("TopicConfigurations", "Topic", "Topic"),
+        "QueueConfiguration": targets("QueueConfigurations", "Queue", "Queue"),
+        "CloudFunctionConfiguration": targets(
+            "LambdaConfigurations", "Function", "CloudFunction"
+        ),
+    }
+    if (cfn.get("EventBridgeConfiguration") or {}).get("EventBridgeEnabled") in (
+        True,
+        "true",
+    ):
+        config["EventBridgeConfiguration"] = {}
+    return config
+
+
 class NotificationConfiguration(BaseModel):
     def __init__(
         self,
@@ -1580,6 +1620,13 @@ class FakeBucket(CloudFormationModel):
         if "Tags" in properties:
             tags = TaggingService().flatten_tag_list(properties["Tags"])
             backend.put_bucket_tagging(bucket_name=resource_name, tags=tags)  # type: ignore
+        if "NotificationConfiguration" in properties:
+            backend.put_bucket_notification_configuration(
+                bucket_name=resource_name,
+                notification_config=cfn_to_api_notification(
+                    properties["NotificationConfiguration"]
+                ),
+            )
 
         return bucket
 

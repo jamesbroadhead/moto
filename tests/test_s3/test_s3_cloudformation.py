@@ -1,5 +1,6 @@
 import json
 import re
+from urllib.parse import unquote_plus
 from uuid import uuid4
 
 import boto3
@@ -210,3 +211,67 @@ def test_s3_bucket_cloudformation_outputs():
         f"http://{bucket_name}.s3-website.{region_name}.amazonaws.com"
     )
     assert output["BucketName"] == bucket_name
+
+
+@mock_aws
+def test_s3_bucket_cloudformation_notification_configuration():
+    s3_client = boto3.client("s3", region_name="us-east-1")
+    sqs_client = boto3.client("sqs", region_name="us-east-1")
+    cf_client = boto3.client("cloudformation", region_name="us-east-1")
+    bucket_name = f"bucket-{uuid4()}"
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Queue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "uploads"},
+            },
+            "Bucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "BucketName": bucket_name,
+                    "NotificationConfiguration": {
+                        "QueueConfigurations": [
+                            {
+                                "Event": "s3:ObjectCreated:*",
+                                "Filter": {
+                                    "S3Key": {
+                                        "Rules": [
+                                            {
+                                                "Name": "Prefix",
+                                                "Value": "notifications/",
+                                            }
+                                        ]
+                                    }
+                                },
+                                "Queue": {"Fn::GetAtt": ["Queue", "Arn"]},
+                            }
+                        ]
+                    },
+                },
+            },
+        },
+    }
+    cf_client.create_stack(StackName=str(uuid4()), TemplateBody=json.dumps(template))
+
+    config = s3_client.get_bucket_notification_configuration(Bucket=bucket_name)
+    assert config["QueueConfigurations"][0]["Events"] == ["s3:ObjectCreated:*"]
+    assert config["QueueConfigurations"][0]["Filter"]["Key"]["FilterRules"] == [
+        {"Name": "prefix", "Value": "notifications/"}
+    ]
+
+    queue_url = sqs_client.get_queue_url(QueueName="uploads")["QueueUrl"]
+    sqs_client.purge_queue(
+        QueueUrl=queue_url
+    )  # the test event S3 sends on configuration
+    s3_client.put_object(Bucket=bucket_name, Key="other/a.csv", Body=b"x")
+    s3_client.put_object(Bucket=bucket_name, Key="notifications/b.csv", Body=b"x")
+    messages = sqs_client.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10)[
+        "Messages"
+    ]
+    keys = [
+        unquote_plus(r["s3"]["object"]["key"])
+        for m in messages
+        for r in json.loads(m["Body"]).get("Records", [])
+    ]
+    assert keys == ["notifications/b.csv"]
