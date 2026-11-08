@@ -7,6 +7,9 @@ computed in DuckDB: each table a query names is loaded into it first, so this su
 sqlglot, pyiceberg, pyarrow and duckdb are optional dependencies, imported only when this module is.
 """
 
+import gzip
+import io
+import json
 import logging
 import os
 import re
@@ -21,6 +24,7 @@ from typing import Any
 import duckdb
 import pyarrow as pa
 import pyarrow.fs as pafs
+import pyarrow.parquet as pq
 import sqlglot
 from pyiceberg.catalog import MetastoreCatalog
 from pyiceberg.exceptions import NoSuchTableError
@@ -75,6 +79,31 @@ _LOCK = threading.RLock()
 
 class QueryFailed(Exception):
     pass
+
+
+_UNLOAD = re.compile(
+    r"^UNLOAD\s*\((?P<query>.*)\)\s*TO\s*'(?P<location>[^']*)'\s*(?:WITH\s*\((?P<options>.*)\))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _unload_value(value: Any) -> Any:
+    """A value as Athena writes it in UNLOAD's JSON and text output."""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.isoformat(sep=" ", timespec="milliseconds")
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value) if value != value.to_integral_value() else int(value)
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, dict):
+        return {k: _unload_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unload_value(v) for v in value]
+    return value
 
 
 @dataclass
@@ -549,6 +578,8 @@ def _statement_types(statement: str) -> tuple[str, str]:
     first = words[0] if words else ""
     if first in ("SELECT", "WITH", "VALUES", "TABLE"):
         return "DML", "SELECT"
+    if first == "UNLOAD":
+        return "DML", "UNLOAD"
     if first in ("INSERT", "UPDATE", "DELETE", "MERGE"):
         return "DML", first
     if first == "CREATE" and "AS" in words and "SELECT" in words:
@@ -590,6 +621,8 @@ class _Query:
             return self._show_tables()
         if words[:2] == ["SHOW", "COLUMNS"]:
             return self._show_columns()
+        if words[:1] == ["UNLOAD"]:
+            return self._unload()
         try:
             statements = [
                 s for s in sqlglot.parse(self.statement, read="athena") if s is not None
@@ -1077,6 +1110,67 @@ class _Query:
         self.outcome.rows = [header] + [
             {"Data": [_cell(v) for v in row]} for row in rows
         ]
+
+    def _unload(self) -> None:
+        match = _UNLOAD.match(self.statement)
+        if not match:
+            raise QueryFailed(
+                f"INVALID_QUERY: Cannot parse UNLOAD: {self.statement[:100]}"
+            )
+        options = {
+            k.lower(): v
+            for k, v in re.findall(
+                r"(\w+)\s*=\s*'([^']*)'", match.group("options") or ""
+            )
+        }
+        fmt = options.get("format", "PARQUET").upper()
+        compression = options.get("compression", "").upper()
+        try:
+            tree = sqlglot.parse_one(match.group("query"), read="athena")
+        except sqlglot.errors.ParseError as e:
+            raise QueryFailed(f"INVALID_QUERY: {e}")
+        self._bind(tree)
+        result = self._query(tree)
+        bucket, _, prefix = match.group("location").removeprefix("s3://").partition("/")
+        if not result.num_rows:
+            return  # Athena writes no files for an empty result
+        name = f"{prefix.rstrip('/')}/{os.urandom(8).hex()}_00000"
+        if fmt == "PARQUET":
+            buffer = io.BytesIO()
+            pq.write_table(
+                result, buffer, compression=(compression or "SNAPPY").lower()
+            )
+            body, key = buffer.getvalue(), name
+        elif fmt in ("JSON", "TEXTFILE"):
+            if fmt == "JSON":
+                lines = [
+                    json.dumps(
+                        {k: _unload_value(v) for k, v in row.items()},
+                        separators=(",", ":"),
+                    )
+                    for row in result.to_pylist(maps_as_pydicts="strict")
+                ]
+            else:
+                delimiter = options.get("field_delimiter", "\x01")
+                lines = [
+                    delimiter.join(
+                        "" if v is None else str(_unload_value(v)) for v in row.values()
+                    )
+                    for row in result.to_pylist(maps_as_pydicts="strict")
+                ]
+            body = ("\n".join(lines) + "\n").encode()
+            key = name
+            if compression in ("", "GZIP"):
+                body, key = gzip.compress(body), f"{name}.gz"
+            elif compression != "NONE":
+                raise QueryFailed(
+                    f"NOT_SUPPORTED: UNLOAD compression {compression} is not supported by moto"
+                )
+        else:
+            raise QueryFailed(
+                f"NOT_SUPPORTED: UNLOAD format {fmt} is not supported by moto"
+            )
+        self.engine.s3.put_object(bucket, key.lstrip("/"), body)
 
     def _insert(self, tree: exp.Insert) -> None:
         target = tree.this

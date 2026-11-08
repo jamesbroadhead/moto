@@ -1,5 +1,7 @@
 """MOTO_ATHENA_SQL_ENGINE=iceberg: Athena queries run over Glue and Iceberg tables in moto's S3."""
 
+import gzip
+import io
 import json
 import textwrap
 from typing import Any
@@ -12,6 +14,8 @@ from moto import mock_aws, settings
 
 for _module in ("sqlglot", "pyiceberg", "pyarrow", "duckdb"):
     pytest.importorskip(_module)
+
+import pyarrow.parquet as pq  # noqa: E402
 
 REGION = "us-east-1"
 BUCKET = "history-bucket"
@@ -151,6 +155,74 @@ def test_insert_and_select_iceberg_rows(athena: Any) -> None:
         "created_at_day=2024-01-01",
         "created_at_day=2024-01-02",
     }
+
+
+def test_unload_writes_the_result_to_s3(athena: Any) -> None:
+    run(athena, ORDERS)
+    run(
+        athena,
+        """
+        INSERT INTO orders VALUES
+            ('a', 1.5, 2, TIMESTAMP '2024-01-01 10:00:00.123456', ARRAY['x'], MAP(ARRAY['k'], ARRAY['v']), 9.99),
+            ('b', 3.0, 1, TIMESTAMP '2024-01-02 11:30:00', NULL, NULL, NULL)
+        """,
+    )
+    s3 = boto3.client("s3", region_name=REGION)
+
+    execution = run(
+        athena,
+        """
+        UNLOAD (WITH q AS (SELECT id, created_at, tags, attributes, price FROM orders)
+                SELECT * FROM q ORDER BY id)
+        TO 's3://history-bucket/unloads/json/' WITH (format = 'JSON')
+        """,
+    )
+    assert (execution["StatementType"], execution["SubstatementType"]) == (
+        "DML",
+        "UNLOAD",
+    )
+    objects = s3.list_objects_v2(Bucket=BUCKET, Prefix="unloads/json/")["Contents"]
+    assert len(objects) == 1 and objects[0]["Key"].endswith(".gz")
+    body = s3.get_object(Bucket=BUCKET, Key=objects[0]["Key"])["Body"].read()
+    lines = [json.loads(line) for line in gzip.decompress(body).decode().splitlines()]
+    assert lines == [
+        {
+            "id": "a",
+            "created_at": "2024-01-01 10:00:00.123",
+            "tags": ["x"],
+            "attributes": {"k": "v"},
+            "price": 9.99,
+        },
+        {
+            "id": "b",
+            "created_at": "2024-01-02 11:30:00.000",
+            "tags": None,
+            "attributes": None,
+            "price": None,
+        },
+    ]
+
+    run(
+        athena,
+        "UNLOAD (SELECT id, quantity FROM orders) TO 's3://history-bucket/unloads/parquet/'",
+    )
+    key = s3.list_objects_v2(Bucket=BUCKET, Prefix="unloads/parquet/")["Contents"][0][
+        "Key"
+    ]
+    table = pq.read_table(
+        io.BytesIO(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
+    )
+    assert sorted(table.to_pylist(), key=lambda r: r["id"]) == [
+        {"id": "a", "quantity": 2},
+        {"id": "b", "quantity": 1},
+    ]
+
+    # Athena writes no files for an empty result
+    run(
+        athena,
+        "UNLOAD (SELECT id FROM orders WHERE id = 'z') TO 's3://history-bucket/unloads/empty/' WITH (format = 'JSON')",
+    )
+    assert "Contents" not in s3.list_objects_v2(Bucket=BUCKET, Prefix="unloads/empty/")
 
 
 def test_insert_select_update_and_delete(athena: Any) -> None:
