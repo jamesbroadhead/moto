@@ -1,6 +1,5 @@
 import json
 import re
-from urllib.parse import unquote_plus
 from uuid import uuid4
 
 import boto3
@@ -270,7 +269,7 @@ def test_s3_bucket_cloudformation_notification_configuration():
         "Messages"
     ]
     keys = [
-        unquote_plus(r["s3"]["object"]["key"])
+        r["s3"]["object"]["key"]
         for m in messages
         for r in json.loads(m["Body"]).get("Records", [])
     ]
