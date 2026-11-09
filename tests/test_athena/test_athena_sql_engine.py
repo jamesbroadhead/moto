@@ -281,6 +281,62 @@ def test_partition_transforms(athena: Any) -> None:
     assert [f["transform"] for f in spec] == ["bucket[4]", "identity", "month"]
 
 
+def test_create_table_as_select(athena: Any) -> None:
+    pytest.importorskip("pyiceberg_core")
+    run(athena, ORDERS)
+    run(
+        athena,
+        """
+        INSERT INTO orders VALUES
+            ('a', 1.5, 2, TIMESTAMP '2024-01-01 10:00:00', NULL, NULL, NULL),
+            ('b', 3.0, 1, TIMESTAMP '2024-01-02 11:30:00', NULL, NULL, NULL),
+            ('c', 4.5, 1, TIMESTAMP '2024-01-02 12:00:00', NULL, NULL, NULL)
+        """,
+    )
+    ctas = """
+        CREATE TABLE IF NOT EXISTS "history"."totals"
+        WITH (
+            table_type = 'ICEBERG',
+            location = 's3://history-bucket/history/totals',
+            partitioning = ARRAY['day(__timestamp__)', 'bucket(quantity, 16)'],
+            is_external = false,
+            write_compression = 'SNAPPY',
+            format = 'PARQUET'
+        ) AS
+        SELECT *, TIMESTAMP '1970-01-01 00:00:00.000000' AS __timestamp__ FROM (
+            SELECT quantity, SUM(amount) AS total FROM orders GROUP BY quantity
+        )
+    """
+    execution = run(athena, ctas)
+    assert execution["SubstatementType"] == "CREATE_TABLE_AS_SELECT"
+    result = athena.get_query_results(QueryExecutionId=execution["QueryExecutionId"])
+    assert result["UpdateCount"] == 2
+    assert rows(athena, "SELECT quantity, total FROM totals ORDER BY quantity") == [
+        ["1", "7.5"],
+        ["2", "1.5"],
+    ]
+
+    table = boto3.client("glue", region_name=REGION).get_table(
+        DatabaseName=DATABASE, Name="totals"
+    )["Table"]
+    bucket, key = (
+        table["Parameters"]["metadata_location"].removeprefix("s3://").split("/", 1)
+    )
+    s3 = boto3.client("s3", region_name=REGION)
+    metadata = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+    spec = metadata["partition-specs"][0]["fields"]
+    assert [f["transform"] for f in spec] == ["day", "bucket[16]"]
+    assert metadata["properties"]["write.parquet.compression-codec"] == "snappy"
+
+    # IF NOT EXISTS leaves the table and its rows alone
+    run(athena, ctas)
+    assert len(rows(athena, "SELECT * FROM totals")) == 2
+
+    hive = "CREATE TABLE copy WITH (format = 'PARQUET') AS SELECT * FROM orders"
+    failed = run(athena, hive, expect="FAILED")
+    assert "Iceberg" in failed["Status"]["StateChangeReason"]
+
+
 def test_alter_table_add_columns(athena: Any) -> None:
     run(athena, ORDERS)
     run(athena, "INSERT INTO orders (id) VALUES ('a')")

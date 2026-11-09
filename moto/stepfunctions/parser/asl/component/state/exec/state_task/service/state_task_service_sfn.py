@@ -1,3 +1,4 @@
+import datetime
 import json
 from collections.abc import Callable
 from typing import Any, Final
@@ -106,8 +107,33 @@ class StateTaskServiceSfn(StateTaskServiceCallback):
                     parameters["Input"] = to_json_str(
                         optional_input, separators=(",", ":")
                     )
+        # The state machine names the request's members as AWS documents them (StateMachineArn); boto's
+        # Step Functions model spells them in camelCase (stateMachineArn).
+        for key in list(parameters):
+            boto_key = key[:1].lower() + key[1:]
+            if boto_key != key:
+                parameters[boto_key] = parameters.pop(key)
         super()._normalise_parameters(
             parameters=parameters,
+            boto_service_name=boto_service_name,
+            service_action_name=service_action_name,
+        )
+
+    def _normalise_response(
+        self,
+        response: Any,
+        boto_service_name: str | None = None,
+        service_action_name: str | None = None,
+    ) -> None:
+        # The state sees the response's members capitalised (ExecutionArn, Output), and dates in epoch milliseconds.
+        if isinstance(response, dict):
+            for key in list(response):
+                value = response.pop(key)
+                if isinstance(value, datetime.datetime):
+                    value = int(value.timestamp() * 1000)
+                response[key[:1].upper() + key[1:]] = value
+        super()._normalise_response(
+            response=response,
             boto_service_name=boto_service_name,
             service_action_name=service_action_name,
         )
@@ -250,4 +276,5 @@ class StateTaskServiceSfn(StateTaskServiceCallback):
         )
         response = getattr(sfn_client, api_action)(**normalised_parameters)
         response.pop("ResponseMetadata", None)
+        self._normalise_response(response=response)
         env.stack.append(response)

@@ -26,12 +26,12 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import sqlglot
-from pyiceberg.catalog import MetastoreCatalog
+from pyiceberg.catalog import Catalog, MetastoreCatalog
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.io import PY_IO_IMPL
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.partitioning import PartitionField, PartitionSpec
-from pyiceberg.schema import Schema
+from pyiceberg.schema import Schema, assign_fresh_schema_ids
 from pyiceberg.serializers import FromInputFile
 from pyiceberg.table import CommitTableResponse, Table
 from pyiceberg.transforms import (
@@ -482,6 +482,43 @@ _TRANSFORMS: dict[str, tuple[Any, str]] = {
 }
 
 
+_ATHENA_TRANSFORM = re.compile(
+    r"^\s*(?:(?P<function>\w+)\s*\(\s*(?P<column>\w+)\s*(?:,\s*(?P<width>\d+)\s*)?\)|(?P<identity>\w+))\s*$"
+)
+
+
+def _athena_partitioning(transforms: list[str], schema: Schema) -> PartitionSpec:
+    """The partition spec of a CTAS's partitioning property: ARRAY['day(ts)', 'bucket(id, 16)', 'region']."""
+    fields = []
+    for i, text in enumerate(transforms):
+        match = _ATHENA_TRANSFORM.match(text)
+        if match is None:
+            raise QueryFailed(f"NOT_SUPPORTED: Unsupported partition transform: {text}")
+        column = (match["column"] or match["identity"]).lower()
+        source = schema.find_field(column)
+        function = (match["function"] or "").lower()
+        transform: Transform[Any, Any]
+        if not function:
+            transform, name = IdentityTransform(), source.name
+        elif function == "bucket" and match["width"]:
+            transform, name = (
+                BucketTransform(int(match["width"])),
+                f"{source.name}_bucket",
+            )
+        elif function == "truncate" and match["width"]:
+            transform, name = (
+                TruncateTransform(int(match["width"])),
+                f"{source.name}_trunc",
+            )
+        elif function in _TRANSFORMS:
+            transform_class, suffix = _TRANSFORMS[function]
+            transform, name = transform_class(), f"{source.name}_{suffix}"
+        else:
+            raise QueryFailed(f"NOT_SUPPORTED: Unsupported partition transform: {text}")
+        fields.append(PartitionField(source.field_id, 1000 + i, transform, name))
+    return PartitionSpec(*fields)
+
+
 def _partition_spec(expressions: list[exp.Expression], schema: Schema) -> PartitionSpec:
     fields = []
     for i, expression in enumerate(expressions):
@@ -695,9 +732,7 @@ class _Query:
         if kind != "TABLE":
             raise QueryFailed(f"NOT_SUPPORTED: CREATE {kind} is not supported by moto")
         if tree.expression is not None:
-            raise QueryFailed(
-                "NOT_SUPPORTED: CREATE TABLE AS SELECT is not supported by moto"
-            )
+            return self._create_as_select(tree)
         schema = tree.this
         table = schema.this if isinstance(schema, exp.Schema) else schema
         database, name = self._name(table)
@@ -732,6 +767,58 @@ class _Query:
             )
         else:
             self._create_hive(database, name, columns, props, tblproperties, location)
+
+    def _create_as_select(self, tree: exp.Create) -> None:
+        table_node = tree.this.this if isinstance(tree.this, exp.Schema) else tree.this
+        database, name = self._name(table_node)
+        if self._glue_table(database, name) is not None:
+            if tree.args.get("exists"):
+                return
+            raise QueryFailed(
+                f"ALREADY_EXISTS: Table '{database}.{name}' already exists"
+            )
+        properties = tree.args.get("properties")
+        props = properties.expressions if properties else []
+        values = {
+            p.name.lower(): p.args["value"]
+            for p in props
+            if type(p) is exp.Property and p.args.get("value")
+        }
+        if values.get("table_type", exp.Literal.string("")).name.lower() != "iceberg":
+            raise QueryFailed(
+                "NOT_SUPPORTED: CREATE TABLE AS SELECT is only supported by moto for Iceberg tables"
+            )
+        location = next(
+            (p.this.name for p in props if isinstance(p, exp.LocationProperty)), None
+        )
+        if not location:
+            raise QueryFailed("INVALID_TABLE_PROPERTY: Iceberg tables need a LOCATION")
+        source = tree.expression
+        self._bind(source)
+        rows = self._query(source)
+        rows = rows.rename_columns([c.lower() for c in rows.column_names])
+        schema = assign_fresh_schema_ids(Catalog._convert_schema_if_needed(rows.schema))
+        partitioning = values.get("partitioning")
+        spec = _athena_partitioning(
+            [e.name for e in partitioning.expressions] if partitioning else [], schema
+        )
+        table_properties = {}
+        for key, value in values.items():
+            if key in ("table_type", "partitioning", "is_external"):
+                continue
+            table_properties[_ICEBERG_PROPERTIES.get(key, key)] = value.name.lower()
+        fmt = next(
+            (p.name for p in props if isinstance(p, exp.FileFormatProperty)), None
+        )
+        if fmt:
+            table_properties[_ICEBERG_PROPERTIES["format"]] = fmt.lower()
+        table = self.engine.catalog.create_table(
+            (database, name), schema, location, spec, table_properties
+        )
+        rows = _conform(rows, table.schema().as_arrow())
+        if rows.num_rows:
+            table.append(rows)
+        self.outcome.update_count = rows.num_rows
 
     def _create_iceberg(
         self,

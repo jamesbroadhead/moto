@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from moto.core.common_models import BackendDict
+from moto.moto_api._internal import mock_random
 from moto.stepfunctions.models import StateMachine, StepFunctionBackend
 from moto.stepfunctions.parser.api import (
     Definition,
@@ -202,7 +203,8 @@ class StepFunctionsParserBackend(StepFunctionBackend):
                     str(ex)
                 )  # TODO: report parsing error like AWS.
 
-        exec_name = name  # TODO: validate name format
+        # AWS names an execution started without one with a UUID.
+        exec_name = name or str(mock_random.uuid4())  # TODO: validate name format
 
         execution_arn = "arn:{}:states:{}:{}:execution:{}:{}"
         execution_arn = execution_arn.format(
@@ -210,7 +212,7 @@ class StepFunctionsParserBackend(StepFunctionBackend):
             self.region_name,
             self.account_id,
             state_machine.name,
-            name,
+            exec_name,
         )
 
         execution = Execution(
