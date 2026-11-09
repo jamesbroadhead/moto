@@ -194,6 +194,28 @@ def lambda_work_dir() -> str:
     )
 
 
+def glue_job_executor() -> str | None:
+    """MOTO_GLUE_JOB_EXECUTOR: "process" runs job runs as local processes, see glue_job_commands."""
+    return (os.environ.get("MOTO_GLUE_JOB_EXECUTOR") or "").lower() or None
+
+
+def glue_job_commands() -> dict[str, list[str]]:
+    """MOTO_GLUE_JOB_COMMANDS: JSON mapping a job's Command.Name to the command that runs its script,
+    as a list or a shell-style string. Default: pythonshell jobs run with the current interpreter.
+    Jobs with other command names keep moto's default behaviour."""
+    import shlex
+    import sys
+
+    commands = json.loads(
+        os.environ.get("MOTO_GLUE_JOB_COMMANDS")
+        or json.dumps({"pythonshell": [sys.executable]})
+    )
+    return {
+        name: shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
+        for name, cmd in commands.items()
+    }
+
+
 def lambda_stub_ecr() -> bool:
     # Whether to stub or mock ecr backend when deploying image based lambdas.
     # True => don't requiring image presence in moto ecr backend for `create_function`.
