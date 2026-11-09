@@ -81,8 +81,10 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 # Marks invocations by an event source mapping, which the process executor keeps from taking every worker.
-# External pollers can send it as an HTTP header on Invoke.
+# External pollers can send it as an HTTP header on Invoke; moto's background pollers send the mapping's ARN
+# in EVENT_SOURCE_MAPPING_ARN_HEADER instead.
 EVENT_SOURCE_HEADER = "x-moto-event-source"
+EVENT_SOURCE_MAPPING_ARN_HEADER = "x-moto-event-source-mapping-arn"
 
 
 class LayerDataType(TypedDict):
@@ -1259,7 +1261,8 @@ class LambdaFunction(CloudFormationModel, DockerModel):
         payload = body.encode("utf-8") if isinstance(body, str) else body
         kwargs = {
             "payload": payload or b"{}",
-            "event_source": request_headers.get(EVENT_SOURCE_HEADER) == "true",
+            "event_source": request_headers.get(EVENT_SOURCE_HEADER) == "true"
+            or bool(request_headers.get(EVENT_SOURCE_MAPPING_ARN_HEADER)),
             "trace_id": request_headers.get("x-amzn-trace-id"),
             "client_context": request_headers.get("x-amz-client-context"),
         }
