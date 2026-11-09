@@ -438,7 +438,11 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
             self._finish(execution, reason)
             return
         engine = SqlEngine(self.account_id, self.region_name)
-        outcome = engine.execute(execution.query, context.get("Database") or "default")
+        outcome = engine.execute(
+            execution.query,
+            context.get("Database") or "default",
+            execution.execution_parameters,
+        )
         execution.statement_type = outcome.statement_type
         execution.substatement_type = outcome.substatement_type
         if outcome.error is None:

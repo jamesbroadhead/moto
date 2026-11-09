@@ -337,6 +337,41 @@ def test_create_table_as_select(athena: Any) -> None:
     assert "Iceberg" in failed["Status"]["StateChangeReason"]
 
 
+def test_execution_parameters(athena: Any) -> None:
+    run(athena, ORDERS)
+    run(
+        athena,
+        """
+        INSERT INTO orders VALUES
+            ('a', 1.5, 2, TIMESTAMP '2024-01-01 10:00:00', NULL, NULL, NULL),
+            ('b?', 3.0, 1, TIMESTAMP '2024-01-02 11:30:00', NULL, NULL, NULL)
+        """,
+    )
+
+    def query(sql: str, parameters: list[str], expect: str = "SUCCEEDED") -> Any:
+        execution_id = athena.start_query_execution(
+            QueryString=sql,
+            QueryExecutionContext={"Database": DATABASE},
+            ResultConfiguration={"OutputLocation": OUTPUT},
+            ExecutionParameters=parameters,
+        )["QueryExecutionId"]
+        execution = athena.get_query_execution(QueryExecutionId=execution_id)
+        assert execution["QueryExecution"]["Status"]["State"] == expect
+        return execution_id
+
+    execution_id = query(
+        "SELECT id FROM orders WHERE amount > ? AND id <> '?' -- why?\n AND quantity = ?",
+        ["1.0", "1"],
+    )
+    result = athena.get_query_results(QueryExecutionId=execution_id)
+    assert [r["Data"][0]["VarCharValue"] for r in result["ResultSet"]["Rows"]] == [
+        "id",
+        "b?",
+    ]
+
+    query("SELECT id FROM orders WHERE id = ?", ["'a'", "'b'"], expect="FAILED")
+
+
 def test_alter_table_add_columns(athena: Any) -> None:
     run(athena, ORDERS)
     run(athena, "INSERT INTO orders (id) VALUES ('a')")

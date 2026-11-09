@@ -592,10 +592,13 @@ class SqlEngine:
         self.s3 = s3_backends[account_id][self.partition]
         self.catalog = _GlueCatalog(self.glue, account_id, self.partition)
 
-    def execute(self, query: str, database: str) -> Outcome:
+    def execute(
+        self, query: str, database: str, parameters: list[str] | None = None
+    ) -> Outcome:
         statement = query.strip().rstrip(";").strip()
         outcome = Outcome(*_statement_types(statement))
         try:
+            statement = _bind_parameters(statement, parameters or [])
             with _LOCK, tempfile.TemporaryDirectory(prefix="moto-athena-") as scratch:
                 running = _Query(self, statement, database.lower(), scratch, outcome)
                 try:
@@ -608,6 +611,56 @@ class SqlEngine:
             outcome.error = f"GENERIC_INTERNAL_ERROR: {type(e).__name__}: {e}"
             _logger.exception("Athena query failed: %s", statement)
         return outcome
+
+
+def _bind_parameters(statement: str, parameters: list[str]) -> str:
+    """Replaces the query's ? placeholders, outside quotes and comments, with ExecutionParameters in order.
+
+    Each parameter is SQL text, as Athena takes them: a string parameter carries its own quotes.
+    """
+    out: list[str] = []
+    remaining = list(parameters)
+    placeholders = 0
+    i = 0
+    while i < len(statement):
+        char = statement[i]
+        if char in "'\"":
+            end = i + 1
+            while end < len(statement):
+                if statement[end] == char:
+                    if (
+                        statement[end + 1 : end + 2] == char
+                    ):  # a doubled quote inside the literal
+                        end += 2
+                        continue
+                    break
+                end += 1
+            out.append(statement[i : end + 1])
+            i = end + 1
+        elif statement.startswith("--", i):
+            end = statement.find("\n", i)
+            end = len(statement) if end == -1 else end
+            out.append(statement[i:end])
+            i = end
+        elif statement.startswith("/*", i):
+            end = statement.find("*/", i + 2)
+            end = len(statement) if end == -1 else end + 2
+            out.append(statement[i:end])
+            i = end
+        elif char == "?":
+            placeholders += 1
+            if remaining:
+                out.append(remaining.pop(0))
+            i += 1
+        else:
+            out.append(char)
+            i += 1
+    if placeholders != len(parameters):
+        raise QueryFailed(
+            f"INVALID_QUERY: The query has {placeholders} parameters, "
+            f"but {len(parameters)} execution parameters were provided"
+        )
+    return "".join(out)
 
 
 def _statement_types(statement: str) -> tuple[str, str]:
