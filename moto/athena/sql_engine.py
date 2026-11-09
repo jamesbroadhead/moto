@@ -64,6 +64,7 @@ from pyiceberg.types import (
 )
 from sqlglot import exp
 
+from moto import settings
 from moto.athena.models import glue_table_columns
 from moto.glue.exceptions import EntityNotFoundException
 from moto.glue.models import glue_backends
@@ -593,7 +594,11 @@ class SqlEngine:
         self.catalog = _GlueCatalog(self.glue, account_id, self.partition)
 
     def execute(
-        self, query: str, database: str, parameters: list[str] | None = None
+        self,
+        query: str,
+        database: str,
+        parameters: list[str] | None = None,
+        catalog: str = "AwsDataCatalog",
     ) -> Outcome:
         statement = query.strip().rstrip(";").strip()
         outcome = Outcome(*_statement_types(statement))
@@ -601,6 +606,7 @@ class SqlEngine:
             statement = _bind_parameters(statement, parameters or [])
             with _LOCK, tempfile.TemporaryDirectory(prefix="moto-athena-") as scratch:
                 running = _Query(self, statement, database.lower(), scratch, outcome)
+                running.catalog = catalog
                 try:
                     running.run()
                 finally:
@@ -626,6 +632,16 @@ def _parameter_literal(parameter: str) -> str:
     if _SQL_LITERAL.match(parameter):
         return parameter
     return "'" + parameter.replace("'", "''") + "'"
+
+
+def federated_dsn(catalog: str) -> str | None:
+    """The PostgreSQL DSN MOTO_ATHENA_FEDERATED_CATALOGS gives a catalog, if any."""
+    import fnmatch
+
+    for pattern, dsn in settings.athena_federated_catalogs().items():
+        if fnmatch.fnmatchcase(catalog, pattern):
+            return dsn
+    return None
 
 
 def _bind_parameters(statement: str, parameters: list[str]) -> str:
@@ -717,6 +733,8 @@ class _Query:
         self.outcome = outcome
         self.duckdb = duckdb.connect()
         self.registered = 0
+        self.catalog = "AwsDataCatalog"
+        self.attached: dict[str, str] = {}
 
     def run(self) -> None:
         words = self.statement.upper().split()
@@ -1152,6 +1170,13 @@ class _Query:
                 not table.db and table.name.lower() in ctes
             ):
                 continue
+            catalog = table.catalog or (
+                self.catalog if self.catalog.lower() != "awsdatacatalog" else ""
+            )
+            if catalog and catalog.lower() != "awsdatacatalog":
+                table.set("catalog", exp.to_identifier(self._attach(catalog)))
+                table.set("db", exp.to_identifier(table.db or self.database))
+                continue
             database, name = self._name(table)
             if database == "information_schema":
                 raise QueryFailed(
@@ -1199,6 +1224,36 @@ class _Query:
             for name in fields:
                 node = exp.Bracket(this=node, expressions=[exp.Literal.string(name)])
             column.replace(node)
+        # Trino casts a JSON string to VARCHAR as its value; DuckDB keeps the quotes
+        for cast in list(tree.find_all(exp.Cast)):
+            if isinstance(cast.this, exp.JSONExtract) and cast.to.is_type(
+                *exp.DataType.TEXT_TYPES
+            ):
+                cast.replace(
+                    exp.JSONExtractScalar(
+                        this=cast.this.this, expression=cast.this.expression
+                    )
+                )
+
+    def _attach(self, catalog: str) -> str:
+        """Attaches a federated catalog's PostgreSQL database to DuckDB, read-only."""
+        if catalog not in self.attached:
+            dsn = federated_dsn(catalog)
+            if dsn is None:
+                raise QueryFailed(
+                    f"CATALOG_NOT_FOUND: Catalog '{catalog}' does not exist"
+                )
+            alias = f"__moto_c{len(self.attached)}"
+            try:
+                self.duckdb.execute("LOAD postgres")
+            except duckdb.Error:
+                self.duckdb.execute("INSTALL postgres")
+                self.duckdb.execute("LOAD postgres")
+            self.duckdb.execute(
+                f"ATTACH {_quote(dsn)} AS {alias} (TYPE postgres, READ_ONLY)"
+            )
+            self.attached[catalog] = alias
+        return self.attached[catalog]
 
     def _load(self, database: str, name: str) -> str:
         glue_table = self._require_table(database, name)

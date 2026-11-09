@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import re
 import time
@@ -427,7 +428,11 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
             execution.context if isinstance(execution.context, dict) else {}
         )
         catalog = context.get("Catalog") or "AwsDataCatalog"
-        if catalog.lower() != "awsdatacatalog":
+        federated = any(
+            fnmatch.fnmatchcase(catalog, pattern)
+            for pattern in settings.athena_federated_catalogs()
+        )
+        if catalog.lower() != "awsdatacatalog" and not federated:
             reason = f"NOT_SUPPORTED: moto runs queries in AwsDataCatalog only, not {catalog}"
             self._finish(execution, reason)
             return
@@ -442,6 +447,7 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
             execution.query,
             context.get("Database") or "default",
             execution.execution_parameters,
+            catalog=catalog,
         )
         execution.statement_type = outcome.statement_type
         execution.substatement_type = outcome.substatement_type

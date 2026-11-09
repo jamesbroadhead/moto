@@ -3,6 +3,7 @@
 import gzip
 import io
 import json
+import os
 import textwrap
 from typing import Any
 from unittest import SkipTest
@@ -420,6 +421,51 @@ def test_struct_fields_and_qualified_columns(athena: Any) -> None:
         ["c1"],
         ["c2"],
     ]
+
+
+def test_json_extract_cast_to_varchar_is_the_value(athena: Any) -> None:
+    run(
+        athena,
+        "CREATE TABLE docs (id string, body string) "
+        "LOCATION 's3://history-bucket/history/docs' TBLPROPERTIES ('table_type' = 'ICEBERG')",
+    )
+    run(athena, """INSERT INTO docs VALUES ('1', '{"name": "Ada", "n": 2}')""")
+    assert rows(
+        athena,
+        "SELECT CAST(JSON_EXTRACT(body, '$.name') AS VARCHAR), "
+        "CAST(JSON_EXTRACT(body, '$.n') AS INTEGER) FROM docs",
+    ) == [["Ada", "2"]]
+
+
+def test_federated_postgres_catalog(
+    athena: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsn = os.environ.get("MOTO_TEST_POSTGRES_DSN")
+    if not dsn:
+        raise SkipTest(
+            "Set MOTO_TEST_POSTGRES_DSN to a PostgreSQL database to run this"
+        )
+    psycopg = pytest.importorskip("psycopg")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS moto_fed")
+        conn.execute("DROP TABLE IF EXISTS moto_fed.items")
+        conn.execute("CREATE TABLE moto_fed.items (id text, data jsonb)")
+        conn.execute(
+            """INSERT INTO moto_fed.items VALUES ('a', '{"tag": "x"}'), ('b', '{"tag": "y"}')"""
+        )
+    monkeypatch.setenv("MOTO_ATHENA_FEDERATED_CATALOGS", json.dumps({"pg-*": dsn}))
+    execution_id = athena.start_query_execution(
+        QueryString="""SELECT id FROM "pg-main"."moto_fed"."items" """
+        "WHERE CAST(JSON_EXTRACT(data, '$.tag') AS VARCHAR) = 'y'",
+        QueryExecutionContext={"Catalog": "pg-main", "Database": "moto_fed"},
+        ResultConfiguration={"OutputLocation": OUTPUT},
+    )["QueryExecutionId"]
+    status = athena.get_query_execution(QueryExecutionId=execution_id)[
+        "QueryExecution"
+    ]["Status"]
+    assert status["State"] == "SUCCEEDED", status.get("StateChangeReason")
+    result = athena.get_query_results(QueryExecutionId=execution_id)
+    assert result["ResultSet"]["Rows"][1]["Data"][0]["VarCharValue"] == "b"
 
 
 def test_alter_table_add_columns(athena: Any) -> None:

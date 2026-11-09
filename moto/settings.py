@@ -116,7 +116,10 @@ def lambda_invoke_endpoint() -> str | None:
 
 def lambda_event_source_mappings_disabled() -> bool:
     """Leave event source mappings to an external poller: moto then does not invoke functions for them."""
-    return os.environ.get("MOTO_LAMBDA_EVENT_SOURCE_MAPPINGS_DISABLED", "false").lower() == "true"
+    return (
+        os.environ.get("MOTO_LAMBDA_EVENT_SOURCE_MAPPINGS_DISABLED", "false").lower()
+        == "true"
+    )
 
 
 def glue_job_run_endpoint() -> str | None:
@@ -129,6 +132,16 @@ def lambda_stub_ecr() -> bool:
     # True => don't requiring image presence in moto ecr backend for `create_function`.
     # False => require image presence in moto ecr backend for `create_function`
     return os.environ.get("MOTO_LAMBDA_STUB_ECR", "TRUE").lower() != "false"
+
+
+def athena_federated_catalogs() -> dict[str, str]:
+    """MOTO_ATHENA_FEDERATED_CATALOGS: JSON mapping catalog-name patterns (fnmatch) to PostgreSQL DSNs.
+
+    The SQL engine reads tables of a matching catalog from that database, as a federated query would.
+    """
+    import json
+
+    return json.loads(os.environ.get("MOTO_ATHENA_FEDERATED_CATALOGS") or "{}")
 
 
 def athena_sql_engine() -> str | None:
