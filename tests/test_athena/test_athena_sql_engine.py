@@ -372,6 +372,48 @@ def test_execution_parameters(athena: Any) -> None:
     query("SELECT id FROM orders WHERE id = ?", ["'a'", "'b'"], expect="FAILED")
 
 
+def test_struct_fields_and_qualified_columns(athena: Any) -> None:
+    lines = [
+        {
+            "id": "p1",
+            "card": {"last4": "4242", "customer": {"id": "c1", "name": "Ada"}},
+        },
+        {
+            "id": "p2",
+            "card": {"last4": "1111", "customer": {"id": "c2", "name": "Bob"}},
+        },
+    ]
+    boto3.client("s3", region_name=REGION).put_object(
+        Bucket=BUCKET,
+        Key="payments/part-0.json",
+        Body="\n".join(json.dumps(line) for line in lines),
+    )
+    run(
+        athena,
+        """
+        CREATE EXTERNAL TABLE payments (
+            id string,
+            card struct<last4:string,customer:struct<id:string,name:string>>
+        )
+        ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+        LOCATION 's3://history-bucket/payments/'
+        """,
+    )
+    assert rows(
+        athena,
+        'SELECT "card"."customer"."name", card.last4 FROM payments '
+        'WHERE "card"."customer"."id" = \'c1\'',
+    ) == [["Ada", "4242"]]
+    assert rows(
+        athena,
+        'SELECT "history"."payments"."id" FROM "history"."payments" ORDER BY 1',
+    ) == [["p1"], ["p2"]]
+    assert rows(athena, "SELECT p.card.customer.id FROM payments p ORDER BY p.id") == [
+        ["c1"],
+        ["c2"],
+    ]
+
+
 def test_alter_table_add_columns(athena: Any) -> None:
     run(athena, ORDERS)
     run(athena, "INSERT INTO orders (id) VALUES ('a')")

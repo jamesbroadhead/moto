@@ -1150,10 +1150,40 @@ class _Query:
                     alias=exp.TableAlias(this=exp.to_identifier(alias)),
                 )
             )
-        # DuckDB knows the bound tables only by their aliases
-        for column in tree.find_all(exp.Column):
-            column.set("db", None)
-            column.set("catalog", None)
+        # DuckDB knows the bound tables only by their aliases. A name's other parts are struct fields:
+        # Athena reads "card"."customer"."id" as field id of field customer of column card.
+        relations = ctes | {
+            node.alias_or_name.lower()
+            for node in tree.find_all(exp.Table, exp.Subquery)
+            if node.alias_or_name
+        }
+        for column in list(tree.find_all(exp.Column)):
+            parts = [
+                p.name
+                for p in (
+                    column.args.get("catalog"),
+                    column.args.get("db"),
+                    column.args.get("table"),
+                    column.this,
+                )
+                if p is not None and p.name
+            ]
+            if len(parts) < 2 or isinstance(column.this, exp.Star):
+                continue
+            # Drop catalog and database qualifiers in front of a relation's name
+            start = next(
+                (i for i, part in enumerate(parts[:-1]) if part.lower() in relations),
+                None,
+            )
+            if start is None:
+                node: exp.Expression = exp.column(parts[0], quoted=True)
+                fields = parts[1:]
+            else:
+                node = exp.column(parts[start + 1], table=parts[start], quoted=True)
+                fields = parts[start + 2 :]
+            for name in fields:
+                node = exp.Bracket(this=node, expressions=[exp.Literal.string(name)])
+            column.replace(node)
 
     def _load(self, database: str, name: str) -> str:
         glue_table = self._require_table(database, name)
