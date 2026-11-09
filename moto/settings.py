@@ -105,6 +105,16 @@ def events_invoke_http() -> bool:
     return os.environ.get("MOTO_EVENTS_INVOKE_HTTP", "false").lower() == "true"
 
 
+def scheduler_fire() -> bool:
+    """Run EventBridge Scheduler schedules and scheduled EventBridge rules: moto invokes their targets when they are due."""
+    return os.environ.get("MOTO_SCHEDULER_FIRE", "false").lower() == "true"
+
+
+def scheduler_tick_seconds() -> float:
+    """How often the schedule runner checks for due schedules."""
+    return float(os.environ.get("MOTO_SCHEDULER_TICK_SECONDS") or "1")
+
+
 def allow_unknown_region() -> bool:
     return os.environ.get("MOTO_ALLOW_NONEXISTENT_REGION", "false").lower() == "true"
 
