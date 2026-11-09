@@ -2251,6 +2251,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
 
     Layers are added to `PYTHONPATH` and `PATH`, and executables in a layer's `extensions/` directory run as external extensions; a function with extensions gets one worker.
     `MOTO_LAMBDA_OPT_DIR=/opt` also links the layers' contents into that directory.
+    Functions inherit Moto's environment without its `MOTO_*` settings, and get `AWS_ENDPOINT_URL` pointing at Moto; `MOTO_LAMBDA_AWS_ENDPOINT_URL` overrides it, and an empty value sets none.
     The settings `MOTO_LAMBDA_PROCESS_POOL_SIZE` (default 4) and the function's reserved concurrency limit the workers per function.
     Event source mapping invocations leave `MOTO_LAMBDA_EVENT_SOURCE_FREE_WORKERS` (default 1) workers for other invocations; external pollers can mark their invocations with the HTTP header `X-Moto-Event-Source: true`.
 

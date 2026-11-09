@@ -654,7 +654,8 @@ class FunctionPool:
 
     def _env(self) -> dict[str, str]:
         spec = self.spec
-        env = dict(os.environ)
+        # Moto's own settings, which can hold secrets such as database DSNs, are not the function's business.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("MOTO_")}
         env.setdefault("AWS_ACCESS_KEY_ID", "role-account-id")
         env.setdefault("AWS_SECRET_ACCESS_KEY", "role-secret-key")
         env.setdefault("AWS_SESSION_TOKEN", "session-token")
@@ -667,8 +668,11 @@ class FunctionPool:
                 "MOTO_HTTP_ENDPOINT": f"{host}:{port}",
             }
         )
-        if not settings.is_test_proxy_mode():
-            env.setdefault("AWS_ENDPOINT_URL", f"{host}:{port}")
+        endpoint_url = settings.lambda_aws_endpoint_url()
+        if endpoint_url is None and not settings.is_test_proxy_mode():
+            endpoint_url = f"{host}:{port}"
+        if endpoint_url:
+            env.setdefault("AWS_ENDPOINT_URL", endpoint_url)
         python_paths = [spec.code_dir]
         bin_paths = []
         for layer in spec.layer_dirs:

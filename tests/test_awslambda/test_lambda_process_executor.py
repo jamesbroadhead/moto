@@ -499,3 +499,38 @@ def test_delete_function_stops_its_workers(client, tmp_path):
     client.delete_function(FunctionName=name)
 
     assert not worker.alive
+
+
+ENV_HANDLER = """import os
+
+
+def handler(event, context):
+    return {k: os.environ.get(k) for k in event["names"]}
+"""
+
+
+def test_moto_settings_stay_out_of_the_function(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("MOTO_ATHENA_FEDERATED_CATALOGS", '{"x": "password=secret"}')
+    monkeypatch.setenv("MOTO_LAMBDA_AWS_ENDPOINT_URL", "")
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+    name = create(client, write_code(tmp_path / "code", ENV_HANDLER))
+
+    _, result = invoke(
+        client,
+        name,
+        {
+            "names": [
+                "MOTO_ATHENA_FEDERATED_CATALOGS",
+                "MOTO_LAMBDA_EXECUTOR",
+                "AWS_ENDPOINT_URL",
+                "MOTO_PORT",
+            ]
+        },
+    )
+
+    assert result == {
+        "MOTO_ATHENA_FEDERATED_CATALOGS": None,
+        "MOTO_LAMBDA_EXECUTOR": None,
+        "AWS_ENDPOINT_URL": None,
+        "MOTO_PORT": "5000",
+    }

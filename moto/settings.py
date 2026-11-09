@@ -213,6 +213,12 @@ def lambda_opt_dir() -> str | None:
     return os.environ.get("MOTO_LAMBDA_OPT_DIR") or None
 
 
+def lambda_aws_endpoint_url() -> str | None:
+    """MOTO_LAMBDA_AWS_ENDPOINT_URL: the AWS_ENDPOINT_URL the process executor gives functions.
+    Unset: Moto's own URL. Empty: none, for hosts that route AWS host names to Moto themselves."""
+    return os.environ.get("MOTO_LAMBDA_AWS_ENDPOINT_URL")
+
+
 def lambda_work_dir() -> str:
     """MOTO_LAMBDA_WORK_DIR: where the process executor unpacks code and gives each worker its TMPDIR."""
     import tempfile
