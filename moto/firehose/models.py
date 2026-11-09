@@ -303,7 +303,14 @@ def _arrow_value(value: Any, arrow_type: Any) -> Any:
             parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
         return parsed
     if pa.types.is_timestamp(arrow_type) and isinstance(value, (int, float)):
-        return datetime.datetime.fromtimestamp(value / 1000, datetime.timezone.utc)
+        # Epoch seconds, milliseconds, microseconds or nanoseconds, told apart by magnitude
+        divisor = next(
+            d
+            for limit, d in ((1e17, 1e9), (1e14, 1e6), (1e11, 1e3), (0, 1))
+            if abs(value) >= limit
+        )
+        moment = datetime.datetime.fromtimestamp(value / divisor, datetime.timezone.utc)
+        return moment if arrow_type.tz else moment.replace(tzinfo=None)
     if pa.types.is_date(arrow_type) and isinstance(value, str):
         return datetime.date.fromisoformat(value[:10])
     if pa.types.is_decimal(arrow_type):

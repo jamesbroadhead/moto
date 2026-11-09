@@ -93,7 +93,7 @@ def test_iceberg_destination_routes_records_to_tables(
         records = [
             {
                 "decision_id": "d1",
-                "reported_at": "2024-03-01T10:00:00Z",
+                "reported_at": 1709287200000000,
                 "payload": {"a": 1},
             },
             {
@@ -109,9 +109,10 @@ def test_iceberg_destination_routes_records_to_tables(
         )
         assert len(response["RequestResponses"]) == 2
 
-        assert _query(athena, "SELECT decision_id, payload FROM outcome") == [
-            ["d1", '{"a": 1}']
-        ]
+        assert _query(
+            athena,
+            "SELECT decision_id, payload, CAST(reported_at AS VARCHAR) FROM outcome",
+        ) == [["d1", '{"a": 1}', "2024-03-01 10:00:00"]]
         assert _query(
             athena,
             "SELECT decision_id, CAST(reported_at AS VARCHAR) FROM outcome_sandbox",
