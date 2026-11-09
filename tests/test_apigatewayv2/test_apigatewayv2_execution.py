@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 from unittest import SkipTest, mock
@@ -378,6 +379,7 @@ def test_request_parameter_mapping(lambdas, client):
             "overwrite:header.x-item": "item-$request.path.id",
             "remove:header.x-secret": "''",
             "append:querystring.source": "$context.stage",
+            "overwrite:header.requesttimeepoch": "$context.requestTimeEpoch",
         },
     )
 
@@ -385,6 +387,7 @@ def test_request_parameter_mapping(lambdas, client):
 
     event = lambdas.event()
     assert event["headers"]["x-item"] == "item-9"
+    assert abs(int(event["headers"]["requesttimeepoch"]) - time.time()) < 60
     assert "x-secret" not in event["headers"]
     assert event["queryStringParameters"] == {"source": "$default"}
 

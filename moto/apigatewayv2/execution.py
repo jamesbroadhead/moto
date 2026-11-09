@@ -728,7 +728,6 @@ class HttpApiInvocation:
             if key == "principalId":
                 return auth.principal_id or ""
             return _claim_text((auth.lambda_context or {}).get(key, ""))
-        epoch_ms = int(self.now.timestamp() * 1000)
         variables = {
             "accountId": self.backend.account_id,
             "apiId": self.api.api_id,
@@ -741,7 +740,9 @@ class HttpApiInvocation:
             "protocol": "HTTP/1.1",
             "requestId": self.request_id,
             "requestTime": self.now.strftime("%d/%b/%Y:%H:%M:%S +0000"),
-            "requestTimeEpoch": str(epoch_ms),
+            # Whole seconds in parameter mappings, unlike the event's timeEpoch: functions behind HTTP APIs read
+            # this header with datetime.utcfromtimestamp
+            "requestTimeEpoch": str(int(self.now.timestamp())),
             "routeKey": match.route.route_key if match else "",
             "stage": self.stage_name,
         }
