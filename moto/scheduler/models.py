@@ -4,7 +4,7 @@ import datetime
 from typing import Any, cast
 
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel
+from moto.core.common_models import CloudFormationModel
 from moto.core.utils import unix_time, utcfromtimestamp, utcnow
 from moto.utilities.paginator import paginate
 from moto.utilities.tagging_service import TaggingService
@@ -18,7 +18,7 @@ from .exceptions import (
 )
 
 
-class Schedule(BaseModel):
+class Schedule(CloudFormationModel):
     def __init__(
         self,
         region: str,
@@ -98,6 +98,69 @@ class Schedule(BaseModel):
             dct["Target"] = {"Arn": dct["Target"]["Arn"]}
         return dct
 
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-scheduler-schedule.html
+        return "AWS::Scheduler::Schedule"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Schedule":
+        properties = cloudformation_json.get("Properties", {})
+        return scheduler_backends[account_id][region_name].create_schedule(
+            description=properties.get("Description"),
+            end_date=properties.get("EndDate"),
+            flexible_time_window=properties.get("FlexibleTimeWindow"),
+            group_name=properties.get("GroupName"),
+            kms_key_arn=properties.get("KmsKeyArn"),
+            name=properties.get("Name") or resource_name,
+            schedule_expression=properties.get("ScheduleExpression"),
+            schedule_expression_timezone=properties.get("ScheduleExpressionTimezone"),
+            start_date=properties.get("StartDate"),
+            state=properties.get("State"),
+            target=properties.get("Target"),
+            action_after_completion=None,
+        )
+
+    @classmethod
+    def delete_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> None:
+        # Properties arrive unresolved here, so GroupName may still be a Ref
+        for group in scheduler_backends[account_id][
+            region_name
+        ].schedule_groups.values():
+            group.schedules.pop(resource_name, None)
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["Arn"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "Arn":
+            return self.arn
+        raise UnformattedGetAttTemplateException()
+
     def update(
         self,
         description: str,
@@ -122,13 +185,70 @@ class Schedule(BaseModel):
         self.last_modified_date = unix_time()
 
 
-class ScheduleGroup(BaseModel):
+class ScheduleGroup(CloudFormationModel):
     def __init__(self, region: str, account_id: str, name: str):
         self.name = name
         self.arn = f"arn:{get_partition(region)}:scheduler:{region}:{account_id}:schedule-group/{name}"
         self.schedules: dict[str, Schedule] = {}
         self.created_on = None if self.name == "default" else unix_time()
         self.last_modified = None if self.name == "default" else unix_time()
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-scheduler-schedulegroup.html
+        return "AWS::Scheduler::ScheduleGroup"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "ScheduleGroup":
+        properties = cloudformation_json.get("Properties", {})
+        return scheduler_backends[account_id][region_name].create_schedule_group(
+            name=properties.get("Name") or resource_name,
+            tags=properties.get("Tags") or [],
+        )
+
+    @classmethod
+    def delete_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> None:
+        scheduler_backends[account_id][region_name].schedule_groups.pop(
+            resource_name, None
+        )
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["Arn", "CreationDate", "LastModificationDate", "State"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> Any:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "Arn":
+            return self.arn
+        if attribute_name == "CreationDate":
+            return self.created_on
+        if attribute_name == "LastModificationDate":
+            return self.last_modified
+        if attribute_name == "State":
+            return "ACTIVE"
+        raise UnformattedGetAttTemplateException()
 
     def add_schedule(self, schedule: Schedule) -> None:
         self.schedules[schedule.name] = schedule
@@ -199,7 +319,7 @@ class EventBridgeSchedulerBackend(BaseBackend):
         """
         The ClientToken parameter is not yet implemented
         """
-        group = self.schedule_groups[group_name or "default"]
+        group = self.get_schedule_group(group_name)
         if name in group.schedules:
             raise ScheduleExists(name)
         schedule = Schedule(

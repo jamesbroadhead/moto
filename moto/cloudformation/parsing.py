@@ -55,6 +55,7 @@ from moto.s3tables import models as s3tables_models  # noqa
 from moto.s3.models import s3_backends
 from moto.s3.utils import bucket_and_name_from_url
 from moto.sagemaker import models as sagemaker_models  # noqa
+from moto.scheduler import models as scheduler_models  # noqa
 from moto.sns import models as sns_models  # noqa
 from moto.sqs import models as sqs_models  # noqa
 from moto.ssm import models as ssm_models  # noqa
