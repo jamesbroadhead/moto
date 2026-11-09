@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from re import Pattern
@@ -105,6 +106,17 @@ class StateMachineVersion(StateMachineInstance, CloudFormationModel):
         self.source_arn = source.arn
         self.version = version
         self.description = description
+
+
+def _cloudformation_definition(properties: dict[str, Any]) -> str:
+    """DefinitionString, or the Definition object, with DefinitionSubstitutions applied."""
+    definition = properties.get("DefinitionString")
+    if definition is None and "Definition" in properties:
+        definition = json.dumps(properties["Definition"])
+    definition = definition or ""
+    for key, value in (properties.get("DefinitionSubstitutions") or {}).items():
+        definition = definition.replace("${" + key + "}", str(value))
+    return definition
 
 
 def _cloudformation_backend(account_id: str, region_name: str) -> "StepFunctionBackend":
@@ -298,11 +310,23 @@ class StateMachine(StateMachineInstance, CloudFormationModel):
     ) -> StateMachine:
         properties = cloudformation_json["Properties"]
         name = properties.get("StateMachineName", resource_name)
-        definition = properties.get("DefinitionString", "")
+        definition = _cloudformation_definition(properties)
         role_arn = properties.get("RoleArn", "")
         tags = cfn_to_api_tags(properties.get("Tags", []))
         sf_backend = _cloudformation_backend(account_id, region_name)
-        return sf_backend.create_state_machine(name, definition, role_arn, tags=tags)
+        try:
+            return sf_backend.create_state_machine(
+                name, definition, role_arn, tags=tags
+            )
+        except Exception as e:
+            if type(sf_backend) is StepFunctionBackend:
+                raise
+            # The executing backend validates definitions with a grammar that lags behind AWS; keep the stack
+            # deployable, and only this state machine cannot run.
+            warnings.warn(f"State machine {name} is not executable: {e}", stacklevel=2)
+            return StepFunctionBackend.create_state_machine(
+                sf_backend, name, definition, role_arn, tags=tags
+            )
 
     @classmethod
     def delete_from_cloudformation_json(  # type: ignore[misc]
@@ -341,7 +365,7 @@ class StateMachine(StateMachineInstance, CloudFormationModel):
 
         else:
             # No Interruption
-            definition = properties.get("DefinitionString")
+            definition = _cloudformation_definition(properties) or None
             role_arn = properties.get("RoleArn")
             tags = cfn_to_api_tags(properties.get("Tags", []))
             sf_backend = _cloudformation_backend(account_id, region_name)

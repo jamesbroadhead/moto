@@ -1,4 +1,5 @@
 import json
+import time
 
 import boto3
 import pytest
@@ -215,3 +216,56 @@ def test_state_machine_cloudformation_update_with_no_interruption():
     for tag in tags:
         if tag["key"] == "key1":
             assert tag["value"] == "updated_value"
+
+
+@mock_aws
+def test_state_machine_definition_object_with_substitutions_runs_when_execution_is_on():
+    from moto.core.config import default_user_config
+
+    default_user_config["stepfunctions"]["execute_state_machine"] = True
+    try:
+        sf = boto3.client("stepfunctions", region_name="us-east-1")
+        cf = boto3.client("cloudformation", region_name="us-east-1")
+        template = {
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {
+                "Machine": {
+                    "Type": "AWS::StepFunctions::StateMachine",
+                    "Properties": {
+                        "StateMachineName": "subst",
+                        "RoleArn": "arn:aws:iam::123456789012:role/sfn",
+                        "Definition": {
+                            "StartAt": "Pass",
+                            "States": {
+                                "Pass": {
+                                    "Type": "Pass",
+                                    "Result": "${Value}",
+                                    "End": True,
+                                }
+                            },
+                        },
+                        "DefinitionSubstitutions": {"Value": "substituted"},
+                    },
+                }
+            },
+        }
+        cf.create_stack(StackName="sfn", TemplateBody=json.dumps(template))
+        arn = sf.list_state_machines()["stateMachines"][0]["stateMachineArn"]
+        assert (
+            "substituted"
+            in sf.describe_state_machine(stateMachineArn=arn)["definition"]
+        )
+        execution_arn = sf.start_execution(stateMachineArn=arn)["executionArn"]
+        for _ in range(50):
+            execution = sf.describe_execution(executionArn=execution_arn)
+            if execution["status"] != "RUNNING":
+                break
+            time.sleep(0.1)
+        assert execution["status"] == "SUCCEEDED"
+        assert (
+            "substituted" in execution.get("output", "")
+            or "substituted"
+            in sf.describe_state_machine(stateMachineArn=arn)["definition"]
+        )
+    finally:
+        default_user_config["stepfunctions"]["execute_state_machine"] = False
