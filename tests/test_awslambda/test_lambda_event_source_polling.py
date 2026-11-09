@@ -245,10 +245,14 @@ def test_sqs_function_error_leaves_messages_until_the_visibility_timeout(endpoin
     boto3.client("sqs", region_name=REGION).send_message(QueueUrl=url, MessageBody="x")
 
     wait_for(lambda: len(endpoint.calls) == 1)
-    assert lam.get_event_source_mapping(UUID=esm["UUID"])["LastProcessingResult"] == (
-        "PROBLEM: Function call failed"
+    # The poller records the result once the function's response arrives
+    wait_for(
+        lambda: lam.get_event_source_mapping(UUID=esm["UUID"]).get(
+            "LastProcessingResult"
+        )
+        == "PROBLEM: Function call failed"
     )
-    time.sleep(0.5)
+    time.sleep(0.3)
     assert len(endpoint.calls) == 1
     assert queue_counts(url) == (0, 1)
     wait_for(lambda: len(endpoint.calls) == 2)
@@ -462,3 +466,32 @@ def test_dynamodb_stream_retries_a_failed_batch(endpoint):
     assert endpoint.calls[3]["event"]["Records"][0]["dynamodb"]["Keys"] == {
         "id": {"S": "b"}
     }
+
+
+@mock_aws
+def test_process_executor_sees_event_source_invocations(monkeypatch):
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("The settings are read by the server process")
+    from moto.awslambda import executor
+
+    seen: list[bool] = []
+
+    def invoke(fn, payload, event_source=False, trace_id=None, client_context=None):
+        seen.append(event_source)
+        return executor.InvocationResult(payload=b"null", error=False)
+
+    monkeypatch.delenv("MOTO_LAMBDA_INVOKE_ENDPOINT", raising=False)
+    monkeypatch.setenv("MOTO_LAMBDA_EXECUTOR", "process")
+    monkeypatch.setenv("MOTO_LAMBDA_EVENT_SOURCE_POLLING", "true")
+    monkeypatch.setattr(EventSourceMappingPoller, "POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(executor, "invoke", invoke)
+    function_arn = create_function()
+    url, queue_arn = create_queue()
+    boto3.client("lambda", region_name=REGION).create_event_source_mapping(
+        EventSourceArn=queue_arn, FunctionName=function_arn
+    )
+    boto3.client("sqs", region_name=REGION).send_message(QueueUrl=url, MessageBody="x")
+
+    wait_for(lambda: seen)
+    assert seen == [True]
+    wait_for(lambda: queue_counts(url) == (0, 0))

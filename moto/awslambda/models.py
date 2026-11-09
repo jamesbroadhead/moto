@@ -88,9 +88,8 @@ logger = logging.getLogger(__name__)
 
 # Marks invocations by an event source mapping, which the process executor keeps from taking every worker.
 # External pollers can send it as an HTTP header on Invoke; moto's background pollers send the mapping's ARN
-# in EVENT_SOURCE_MAPPING_ARN_HEADER instead.
+# in EVENT_SOURCE_MAPPING_HEADER instead.
 EVENT_SOURCE_HEADER = "x-moto-event-source"
-EVENT_SOURCE_MAPPING_ARN_HEADER = "x-moto-event-source-mapping-arn"
 
 
 class LayerDataType(TypedDict):
@@ -1276,7 +1275,7 @@ class LambdaFunction(CloudFormationModel, DockerModel):
         kwargs = {
             "payload": payload or b"{}",
             "event_source": request_headers.get(EVENT_SOURCE_HEADER) == "true"
-            or bool(request_headers.get(EVENT_SOURCE_MAPPING_ARN_HEADER)),
+            or bool(request_headers.get(EVENT_SOURCE_MAPPING_HEADER.lower())),
             "trace_id": request_headers.get("x-amzn-trace-id"),
             "client_context": request_headers.get("x-amz-client-context"),
         }
@@ -2271,6 +2270,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
     def reset(self) -> None:
         for esm in self._event_source_mappings.values():
             stop_polling(esm.arn)
+        executor.shutdown(self.account_id, self.region_name)
         super().reset()
 
     def create_alias(
@@ -2557,10 +2557,6 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         )
         self._lambdas.del_function(function_name, qualifier)
         executor.shutdown(self.account_id, self.region_name, fn.function_name)
-
-    def reset(self) -> None:
-        executor.shutdown(self.account_id, self.region_name)
-        super().reset()
 
     def list_functions(
         self, func_version: str | None = None
