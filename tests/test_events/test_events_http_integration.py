@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from unittest import SkipTest, mock
 
 import boto3
@@ -83,3 +84,68 @@ def test_invoke_http_request_on_event():
                 }
             ]
         )
+        _wait_for_calls(rsps, 1)
+
+
+def _wait_for_calls(rsps: responses.RequestsMock, count: int) -> None:
+    # EventBridge delivers to API destinations asynchronously
+    deadline = time.time() + 10
+    while len(rsps.calls) < count and time.time() < deadline:
+        time.sleep(0.05)
+
+
+@mock_aws
+@mock.patch.dict(os.environ, {"MOTO_EVENTS_INVOKE_HTTP": "true"})
+def test_api_destination_sends_the_input_with_the_connection_key_and_retries():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't intercept HTTP requests in ServerMode")
+    events = boto3.client("events", region_name="eu-west-1")
+    connection_arn = events.create_connection(
+        Name="decide",
+        AuthorizationType="API_KEY",
+        AuthParameters={
+            "ApiKeyAuthParameters": {"ApiKeyName": "X-Api-Key", "ApiKeyValue": "secret"}
+        },
+    )["ConnectionArn"]
+    destination_arn = events.create_api_destination(
+        Name="decide",
+        ConnectionArn=connection_arn,
+        InvocationEndpoint="https://decide.example.com/flows/*/decide",
+        HttpMethod="POST",
+    )["ApiDestinationArn"]
+    events.put_rule(
+        Name="rule", State="ENABLED", EventPattern=json.dumps({"source": ["s"]})
+    )
+    events.put_targets(
+        Rule="rule",
+        Targets=[
+            {
+                "Id": "1",
+                "Arn": destination_arn,
+                "HttpParameters": {"PathParameterValues": ["webhooks"]},
+                "RetryPolicy": {"MaximumRetryAttempts": 2},
+                "InputTransformer": {
+                    "InputPathsMap": {"id": "$.detail.id"},
+                    "InputTemplate": '{"data": {"id": "<id>"}}',
+                },
+            }
+        ],
+    )
+
+    with responses.RequestsMock(assert_all_requests_are_fired=True) as rsps:
+        url = "https://decide.example.com/flows/webhooks/decide"
+        rsps.add(responses.POST, url, status=503)
+        rsps.add(
+            responses.POST,
+            url,
+            status=200,
+            match=[
+                responses.matchers.header_matcher({"X-Api-Key": "secret"}),
+                responses.matchers.json_params_matcher({"data": {"id": "42"}}),
+            ],
+        )
+        events.put_events(
+            Entries=[{"Source": "s", "DetailType": "t", "Detail": '{"id": "42"}'}]
+        )
+        _wait_for_calls(rsps, 2)
+        assert [c.response.status_code for c in rsps.calls] == [503, 200]

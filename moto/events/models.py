@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import copy
 import ipaddress
 import json
 import re
 import sys
+import threading
+import time
 import warnings
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -202,21 +205,11 @@ class Rule(CloudFormationModel):
             cross_account_backend.put_events([new_event])
         elif arn.service == "events" and arn.resource_type == "api-destination":
             if settings.events_invoke_http():
-                api_destination = self._find_api_destination(arn.resource_id)
-                request_parameters = target.get("HttpParameters", {})
-                headers = request_parameters.get("HeaderParameters", {})
-                qs_params = request_parameters.get("QueryStringParameters", {})
-                query_string = "&".join(
-                    [f"{key}={val}" for key, val in qs_params.items()]
-                )
-                url = api_destination.invocation_endpoint + (
-                    f"?{query_string}" if query_string else ""
-                )
-                requests.request(
-                    method=api_destination.http_method,
-                    url=url,
-                    headers=headers,
-                )
+                threading.Thread(
+                    target=self._send_to_api_destination,
+                    args=(arn.resource_id, target, event),
+                    daemon=True,
+                ).start()
         elif arn.service == "states" and arn.resource_type == "stateMachine":
             self._send_to_sfn_state_machine(target["Arn"], event)
         elif arn.service == "firehose" or arn.service == "kinesisfirehose":
@@ -291,6 +284,78 @@ class Rule(CloudFormationModel):
         )
         if archive.uuid == archive_uuid:  # type: ignore[union-attr]
             archive.events.append(event)  # type: ignore[union-attr]
+
+    def _send_to_api_destination(
+        self, resource_id: str, target: dict[str, Any], event: Any
+    ) -> None:
+        """POSTs the target's input as JSON with the connection's authorization, retrying as EventBridge does.
+
+        5xx, 429 and connection errors are retried with backoff, up to the target's RetryPolicy
+        (at most 5 attempts here); an event that is still not delivered goes to its dead-letter queue.
+        """
+        destination = self._find_api_destination(resource_id)
+        backend: EventsBackend = events_backends[self.account_id][self.region_name]
+        connection = backend.connections.get(
+            destination.connection_arn.split(":connection/")[-1].split("/")[0]
+        )
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        query = {}
+        body = event
+        if connection is not None:
+            auth = connection.auth_parameters or {}
+            api_key = auth.get("ApiKeyAuthParameters")
+            basic = auth.get("BasicAuthParameters")
+            if api_key:
+                headers[api_key["ApiKeyName"]] = api_key["ApiKeyValue"]
+            elif basic:
+                token = base64.b64encode(
+                    f"{basic['Username']}:{basic['Password']}".encode()
+                ).decode()
+                headers["Authorization"] = f"Basic {token}"
+            invocation = auth.get("InvocationHttpParameters") or {}
+            headers.update(
+                {p["Key"]: p["Value"] for p in invocation.get("HeaderParameters", [])}
+            )
+            query.update(
+                {
+                    p["Key"]: p["Value"]
+                    for p in invocation.get("QueryStringParameters", [])
+                }
+            )
+            if invocation.get("BodyParameters") and isinstance(body, dict):
+                body = {
+                    **body,
+                    **{p["Key"]: p["Value"] for p in invocation["BodyParameters"]},
+                }
+        parameters = target.get("HttpParameters") or {}
+        headers.update(parameters.get("HeaderParameters") or {})
+        query.update(parameters.get("QueryStringParameters") or {})
+        url = destination.invocation_endpoint
+        for value in parameters.get("PathParameterValues") or []:
+            url = url.replace("*", value, 1)
+        data = json.dumps(body, default=str) if not isinstance(body, str) else body
+
+        policy = target.get("RetryPolicy") or {}
+        attempts = 1 + min(int(policy.get("MaximumRetryAttempts", 185)), 4)
+        for attempt in range(attempts):
+            try:
+                response = requests.request(
+                    method=destination.http_method,
+                    url=url,
+                    params=query,
+                    headers=headers,
+                    data=data,
+                    timeout=30,
+                )
+                if response.status_code < 500 and response.status_code != 429:
+                    return
+            except requests.RequestException:
+                pass
+            if attempt < attempts - 1:
+                time.sleep(2**attempt)
+        dead_letter = (target.get("DeadLetterConfig") or {}).get("Arn")
+        if dead_letter:
+            self._send_to_sqs_queue(parse_arn(dead_letter).resource_id, event)
 
     def _find_api_destination(self, resource_id: str) -> Destination:
         backend: EventsBackend = events_backends[self.account_id][self.region_name]
