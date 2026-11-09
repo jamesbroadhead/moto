@@ -14,6 +14,7 @@ Incomplete list of unfinished items:
 
 import io
 import json
+import re
 import warnings
 from collections.abc import Iterator
 from gzip import GzipFile
@@ -23,7 +24,7 @@ from typing import Any
 import requests
 
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel
+from moto.core.common_models import CloudFormationModel
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.types import Base64EncodedString
 from moto.core.utils import utcnow
@@ -110,7 +111,7 @@ def create_s3_destination_config(
     return destination
 
 
-class DeliveryStream(BaseModel):
+class DeliveryStream(CloudFormationModel):
     """Represents a delivery stream, its source and destination configs."""
 
     STATES = {"CREATING", "ACTIVE", "CREATING_FAILED"}
@@ -171,6 +172,120 @@ class DeliveryStream(BaseModel):
 
         # I believe boto3 only adds this field after an update ...
         self.last_update_timestamp = utcnow()
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.delivery_stream_name
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "DeliveryStreamName"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-kinesisfirehose-deliverystream.html
+        return "AWS::KinesisFirehose::DeliveryStream"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "DeliveryStream":
+        properties = cloudformation_json.get("Properties", {})
+        backend = firehose_backends[account_id][region_name]
+        name = properties.get("DeliveryStreamName") or resource_name
+        backend.create_delivery_stream(
+            region=region_name,
+            delivery_stream_name=name,
+            delivery_stream_type=properties.get("DeliveryStreamType"),
+            kinesis_stream_source_configuration=properties.get(
+                "KinesisStreamSourceConfiguration"
+            ),
+            delivery_stream_encryption_configuration_input=properties.get(
+                "DeliveryStreamEncryptionConfigurationInput"
+            ),
+            s3_destination_configuration=properties.get("S3DestinationConfiguration"),
+            extended_s3_destination_configuration=properties.get(
+                "ExtendedS3DestinationConfiguration"
+            ),
+            redshift_destination_configuration=properties.get(
+                "RedshiftDestinationConfiguration"
+            ),
+            elasticsearch_destination_configuration=properties.get(
+                "ElasticsearchDestinationConfiguration"
+            ),
+            splunk_destination_configuration=properties.get(
+                "SplunkDestinationConfiguration"
+            ),
+            http_endpoint_destination_configuration=properties.get(
+                "HttpEndpointDestinationConfiguration"
+            ),
+            snowflake_destination_configuration=properties.get(
+                "SnowflakeDestinationConfiguration"
+            ),
+            iceberg_destination_configuration=properties.get(
+                "IcebergDestinationConfiguration"
+            ),
+            tags=properties.get("Tags"),
+        )
+        return backend.delivery_streams[name]
+
+    @classmethod
+    def delete_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> None:
+        backend = firehose_backends[account_id][region_name]
+        if resource_name in backend.delivery_streams:
+            backend.delete_delivery_stream(resource_name)
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["Arn"]
+
+    def get_cfn_attribute(self, attribute_name: str) -> str:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        if attribute_name == "Arn":
+            return self.delivery_stream_arn
+        raise UnformattedGetAttTemplateException()
+
+
+_JAVA_DATE_FORMAT = [
+    ("yyyy", "%Y"),
+    ("yy", "%y"),
+    ("MM", "%m"),
+    ("dd", "%d"),
+    ("HH", "%H"),
+    ("mm", "%M"),
+    ("ss", "%S"),
+]
+
+
+def _expand_prefix(prefix: str, keys: dict[str, str], now: Any) -> str:
+    """Evaluates a prefix's !{namespace:expression} expressions."""
+
+    def evaluate(match: "re.Match[str]") -> str:
+        namespace, _, expression = match.group(1).partition(":")
+        if namespace in ("partitionKeyFromQuery", "partitionKeyFromLambda"):
+            return keys.get(expression, "")
+        if namespace == "timestamp":
+            fmt = expression
+            for java, python in _JAVA_DATE_FORMAT:
+                fmt = fmt.replace(java, python)
+            return now.strftime(fmt)
+        if namespace == "firehose" and expression == "random-string":
+            return mock_random.get_random_string(length=11, lower_case=True)
+        return match.group(0)
+
+    return re.sub(r"!\{([^}]*)\}", evaluate, prefix)
 
 
 class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
@@ -473,25 +588,93 @@ class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
         s3_destination: dict[str, Any],
         records: list[dict[str, bytes]],
     ) -> list[dict[str, str]]:
-        """Put records to a ExtendedS3 or S3 destination."""
-        # Taken from LocalStack's firehose logic, with minor changes.
+        """Put records to a ExtendedS3 or S3 destination.
+
+        Applies the MetadataExtraction (with the optional jq package) and AppendDelimiterToRecord processors,
+        the prefix's !{partitionKeyFromQuery:...}, !{timestamp:...} and !{firehose:random-string} expressions, and
+        GZIP compression. Each call writes one object per prefix; there is no buffering.
+        """
         bucket_name = s3_destination["BucketARN"].split(":")[-1]
         prefix = s3_destination.get("Prefix", "")
-        object_path = self._format_s3_object_path(
-            delivery_stream_name, version_id, prefix
-        )
+        processors = (s3_destination.get("ProcessingConfiguration") or {}).get(
+            "Processors"
+        ) or []
+        enabled = str(
+            (s3_destination.get("ProcessingConfiguration") or {}).get("Enabled", True)
+        ).lower() in ("true", "1")
+        query = delimiter = None
+        for processor in processors if enabled else []:
+            parameters = {
+                p["ParameterName"]: p["ParameterValue"]
+                for p in processor.get("Parameters") or []
+            }
+            if processor.get("Type") == "MetadataExtraction":
+                query = parameters.get("MetadataExtractionQuery")
+            elif processor.get("Type") == "AppendDelimiterToRecord":
+                delimiter = (
+                    parameters.get("Delimiter", "\\n")
+                    .encode()
+                    .decode("unicode_escape")
+                    .encode()
+                )
+            else:
+                warnings.warn(
+                    f"Firehose processor {processor.get('Type')} is not supported by moto",
+                    stacklevel=2,
+                )
 
-        batched_data = b"".join([r["Data"] for r in records])
-        try:
-            s3_backends[self.account_id][self.partition].put_object(
-                bucket_name, object_path, batched_data
+        now = utcnow()
+        objects: dict[str, list[bytes]] = {}
+        for record in records:
+            keys = self._partition_keys(query, record["Data"]) if query else {}
+            object_prefix = _expand_prefix(prefix, keys, now)
+            data = record["Data"] + (delimiter or b"")
+            objects.setdefault(object_prefix, []).append(data)
+
+        compression = s3_destination.get("CompressionFormat", "UNCOMPRESSED")
+        for object_prefix, chunks in objects.items():
+            if "!{" not in prefix:
+                object_prefix = (
+                    f"{object_prefix}{'' if object_prefix.endswith('/') or object_prefix == '' else '/'}"
+                    f"{now.strftime('%Y/%m/%d/%H')}/"
+                )
+            object_path = (
+                f"{object_prefix}{delivery_stream_name}-{version_id}-"
+                f"{now.strftime('%Y-%m-%d-%H-%M-%S')}-{str(mock_random.uuid4())}"
             )
-        except Exception as exc:
-            # This could be better ...
-            raise RuntimeError(
-                "Firehose PutRecord(Batch to S3 destination failed"
-            ) from exc
+            body = b"".join(chunks)
+            if compression == "GZIP":
+                buffer = io.BytesIO()
+                with GzipFile(fileobj=buffer, mode="wb") as gz:
+                    gz.write(body)
+                body, object_path = buffer.getvalue(), object_path + ".gz"
+            try:
+                s3_backends[self.account_id][self.partition].put_object(
+                    bucket_name, object_path, body
+                )
+            except Exception as exc:
+                # This could be better ...
+                raise RuntimeError(
+                    "Firehose PutRecord(Batch to S3 destination failed"
+                ) from exc
         return [{"RecordId": str(mock_random.uuid4())} for _ in range(len(records))]
+
+    @staticmethod
+    def _partition_keys(query: str, data: bytes) -> dict[str, str]:
+        try:
+            import jq
+        except ImportError:
+            warnings.warn(
+                "Firehose dynamic partitioning by query needs the jq package",
+                stacklevel=2,
+            )
+            return {}
+        try:
+            result = jq.compile(query).input_value(json.loads(data)).first()
+        except Exception as exc:  # AWS sends such records to the error output prefix
+            warnings.warn(f"Firehose metadata extraction failed: {exc}", stacklevel=2)
+            return {}
+        return {k: "" if v is None else str(v) for k, v in (result or {}).items()}
 
     def put_record_batch(
         self, delivery_stream_name: str, records: list[dict[str, bytes]]

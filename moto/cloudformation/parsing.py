@@ -41,6 +41,7 @@ from moto.elb import models as elb_models  # noqa
 from moto.elbv2 import models as elbv2_models  # noqa
 from moto.emr import models as emr_models  # noqa
 from moto.events import models as events_models  # noqa
+from moto.firehose import models as firehose_models  # noqa
 from moto.glue import models as glue_models  # noqa
 from moto.iam import models as iam_models  # noqa
 from moto.iot import models as iot_models  # noqa
@@ -594,7 +595,9 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
                 raise KeyError(resource_logical_id)
             # A reference can create this resource early; its dependencies come first all the same
             depends_on = resource_json.get("DependsOn") or []
-            for dependency in [depends_on] if isinstance(depends_on, str) else depends_on:
+            for dependency in (
+                [depends_on] if isinstance(depends_on, str) else depends_on
+            ):
                 if dependency in self._resource_json_map:
                     self[dependency]
             try:
@@ -1042,8 +1045,11 @@ class OutputMap(collections_abc.Mapping):  # type: ignore[type-arg]
         exports = []
         if self.outputs:
             for value in self._output_json_map.values():
-                if "Condition" in value and not self._resource_map.lazy_condition_map.get(
-                    value["Condition"]
+                if (
+                    "Condition" in value
+                    and not self._resource_map.lazy_condition_map.get(
+                        value["Condition"]
+                    )
                 ):
                     # The output does not exist, so neither does its export
                     continue
