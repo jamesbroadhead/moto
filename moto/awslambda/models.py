@@ -25,9 +25,10 @@ from typing import Any, TypedDict
 import requests.exceptions
 
 from moto import settings
+from moto.awslambda import executor
 from moto.awslambda.policy import Policy
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel, CloudFormationModel
+from moto.core.common_models import CloudFormationModel
 from moto.core.exceptions import JsonRESTError as RESTError
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.utils import iso_8601_datetime_with_nanoseconds, unix_time_millis, utcnow
@@ -59,6 +60,7 @@ from .exceptions import (
     InvalidRoleFormat,
     LambdaClientError,
     ResourceConflictException,
+    TooManyRequestsException,
     UnknownAliasException,
     UnknownEventConfig,
     UnknownFunctionException,
@@ -77,6 +79,10 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Marks invocations by an event source mapping, which the process executor keeps from taking every worker.
+# External pollers can send it as an HTTP header on Invoke.
+EVENT_SOURCE_HEADER = "x-moto-event-source"
 
 
 class LayerDataType(TypedDict):
@@ -304,6 +310,17 @@ def _s3_content(key: Any) -> tuple[bytes, int, str, str]:
     return key.value, key.size, base64ed_sha, sha_hex_digest
 
 
+def _local_content(path: str) -> tuple[bytes, int, str, str]:
+    """Code in MOTO_LAMBDA_LOCAL_CODE_BUCKET stays on disk; its hash changes with the path, not the content."""
+    sha_code = hashlib.sha256(path.encode("utf-8"))
+    return (
+        b"",
+        0,
+        base64.b64encode(sha_code.digest()).decode("utf-8"),
+        sha_code.hexdigest(),
+    )
+
+
 def _validate_s3_bucket_and_key(
     account_id: str, partition: str, data: dict[str, Any]
 ) -> FakeKey | None:
@@ -467,6 +484,13 @@ class LayerVersion(CloudFormationModel):
                 self.code_sha_256,
                 self.code_digest,
             ) = _zipfile_content(self.content["ZipFile"])
+        elif local_path := executor.local_code_path(self.content):
+            (
+                self.code_bytes,
+                self.code_size,
+                self.code_sha_256,
+                self.code_digest,
+            ) = _local_content(local_path)
         else:
             partition = get_partition(region)
             key = _validate_s3_bucket_and_key(
@@ -611,7 +635,7 @@ class LambdaAlias(CloudFormationModel):
         account_id: str,
         region_name: str,
         **kwargs: Any,
-    ) -> "LambdaAlias":
+    ) -> LambdaAlias:
         properties = cloudformation_json["Properties"]
         return get_backend(account_id, region_name).create_alias(
             name=properties.get("Name", resource_name),
@@ -948,6 +972,16 @@ class LambdaFunction(CloudFormationModel, DockerModel):
             # TODO: we should be putting this in a lambda bucket
             self.code["UUID"] = str(random.uuid4())
             self.code["S3Key"] = f"{self.function_name}-{self.code['UUID']}"
+        elif local_path := executor.local_code_path(updated_spec):
+            (
+                self.code_bytes,
+                self.code_size,
+                self.code_sha_256,
+                self.code_digest,
+            ) = _local_content(local_path)
+            if from_update:
+                self.code["S3Bucket"] = updated_spec["S3Bucket"]
+                self.code["S3Key"] = updated_spec["S3Key"]
         elif "S3Bucket" in updated_spec and "S3Key" in updated_spec:
             key = None
             try:
@@ -1044,10 +1078,15 @@ class LambdaFunction(CloudFormationModel, DockerModel):
         headers = {"X-Amz-Invocation-Type": "RequestResponse", "X-Amz-Log-Type": "Tail"}
 
         def call() -> tuple[str, bool, str]:
-            resp = requests.post(url, data=data, headers=headers, timeout=float(self.timeout) + 30)
+            resp = requests.post(
+                url, data=data, headers=headers, timeout=float(self.timeout) + 30
+            )
             logs = resp.headers.get("X-Amz-Log-Result", "")
             logs = base64.b64decode(logs).decode("utf-8") if logs else ""
-            errored = bool(resp.headers.get("X-Amz-Function-Error")) or resp.status_code >= 300
+            errored = (
+                bool(resp.headers.get("X-Amz-Function-Error"))
+                or resp.status_code >= 300
+            )
             return resp.text, errored, logs
 
         if invocation_type == "Event":
@@ -1205,6 +1244,47 @@ class LambdaFunction(CloudFormationModel, DockerModel):
             self.save_logs(msg)
             return msg, True, ""
 
+    def _invoke_process(
+        self, body: str | bytes, request_headers: Any, response_headers: Any
+    ) -> str | bytes:
+        """Runs the invocation in a warm local process, see moto.awslambda.executor."""
+        inv_type = request_headers.get("x-amz-invocation-type", "RequestResponse")
+        if inv_type == "DryRun":
+            return b""
+        if (
+            self.reserved_concurrency is not None
+            and int(self.reserved_concurrency) == 0
+        ):
+            raise TooManyRequestsException()
+        payload = body.encode("utf-8") if isinstance(body, str) else body
+        kwargs = {
+            "payload": payload or b"{}",
+            "event_source": request_headers.get(EVENT_SOURCE_HEADER) == "true",
+            "trace_id": request_headers.get("x-amzn-trace-id"),
+            "client_context": request_headers.get("x-amz-client-context"),
+        }
+        response_headers["x-amz-executed-version"] = str(self.version)
+        if inv_type == "Event":
+
+            def run() -> None:
+                result = executor.invoke(self, **kwargs)
+                if result.error:
+                    logger.warning(
+                        "Asynchronous invocation of %s failed: %s",
+                        self.function_name,
+                        result.payload[:1000].decode("utf-8", "replace"),
+                    )
+
+            threading.Thread(target=run, daemon=True).start()
+            return b""
+        result = executor.invoke(self, **kwargs)
+        if result.error:
+            response_headers["x-amz-function-error"] = "Unhandled"
+        response_headers["x-amz-log-result"] = base64.b64encode(
+            result.logs.encode("utf-8")
+        ).decode("utf-8")
+        return result.payload
+
     def save_logs(self, output: str) -> None:
         # Send output to "logs" backend
         invoke_id = random.uuid4().hex
@@ -1224,6 +1304,11 @@ class LambdaFunction(CloudFormationModel, DockerModel):
     def invoke(
         self, body: str, request_headers: Any, response_headers: Any
     ) -> str | bytes:
+        if (
+            settings.lambda_executor() == "process"
+            and not settings.lambda_invoke_endpoint()
+        ):
+            return self._invoke_process(body, request_headers, response_headers)
         if body:
             body = json.loads(body)
         else:
@@ -2128,6 +2213,31 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
 
         @mock_aws(config={"lambda": {"use_docker": False}})
 
+
+    _-_-_-_
+
+    To run functions without Docker, in warm local processes, start Moto with:
+
+    .. sourcecode:: bash
+
+        MOTO_LAMBDA_EXECUTOR=process moto_server
+
+    Each function version gets a pool of worker processes, started on first use and reused across invocations.
+    Moto serves the Lambda Runtime API and Extensions API to each worker, and starts the runtime's bootstrap,
+    so the runtime interface client runs the handler as it does in AWS:
+
+    - `provided.*` runtimes run the `bootstrap` executable from the code or a layer.
+    - Python runtimes run `/var/runtime/bootstrap` when Moto runs in a Lambda base image, otherwise `awslambdaric` if it is installed, otherwise a minimal runtime client in the current interpreter.
+    - `MOTO_LAMBDA_RUNTIME_COMMANDS` maps runtime patterns to other bootstrap commands, for example `{"java21": "/opt/java21/bootstrap"}`.
+
+    Layers are added to `PYTHONPATH` and `PATH`, and executables in a layer's `extensions/` directory run as external extensions; a function with extensions gets one worker.
+    `MOTO_LAMBDA_OPT_DIR=/opt` also links the layers' contents into that directory.
+    The settings `MOTO_LAMBDA_PROCESS_POOL_SIZE` (default 4) and the function's reserved concurrency limit the workers per function.
+    Event source mapping invocations leave `MOTO_LAMBDA_EVENT_SOURCE_FREE_WORKERS` (default 1) workers for other invocations; external pollers can mark their invocations with the HTTP header `X-Moto-Event-Source: true`.
+
+    To use code without uploading it, set `MOTO_LAMBDA_LOCAL_CODE_BUCKET=local-code` and create the function or layer with `Code={"S3Bucket": "local-code", "S3Key": "/path/to/code"}`; the key is a local directory or zip file.
+    `MOTO_LAMBDA_LAYER_PATHS` maps layer version ARN patterns to local directories, for layers Moto does not hold, such as public AWS layers.
+
     """
 
     SERVICE_NAMESPACE = "lambda"
@@ -2410,7 +2520,15 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         return self._lambdas.get_arn(function_arn)
 
     def delete_function(self, function_name: str, qualifier: str | None = None) -> None:
+        fn = self._lambdas.get_function_by_name_or_arn_with_qualifier(
+            function_name, qualifier
+        )
         self._lambdas.del_function(function_name, qualifier)
+        executor.shutdown(self.account_id, self.region_name, fn.function_name)
+
+    def reset(self) -> None:
+        executor.shutdown(self.account_id, self.region_name)
+        super().reset()
 
     def list_functions(
         self, func_version: str | None = None
@@ -2459,7 +2577,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
                 }
             )
 
-        request_headers: dict[str, Any] = {}
+        request_headers: dict[str, Any] = {EVENT_SOURCE_HEADER: "true"}
         response_headers: dict[str, Any] = {}
         self.invoke(
             function_name=function_arn,
@@ -2502,7 +2620,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
                 }
             ]
         }
-        func.invoke(json.dumps(event), {}, {})
+        func.invoke(json.dumps(event), {EVENT_SOURCE_HEADER: "true"}, {})
 
     def send_sns_message(
         self,
@@ -2569,7 +2687,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
             )
         event = {"Records": records}
         func = self._lambdas.get_arn(function_arn)
-        return func.invoke(json.dumps(event), {}, {})  # type: ignore[union-attr]
+        return func.invoke(json.dumps(event), {EVENT_SOURCE_HEADER: "true"}, {})  # type: ignore[union-attr]
 
     def send_log_event(
         self,
