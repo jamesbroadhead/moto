@@ -234,7 +234,7 @@ class StreamShard(BaseModel):
         from moto.awslambda.utils import get_backend
 
         for arn, esm in self.table.lambda_event_source_mappings.items():
-            if settings.lambda_event_source_mappings_disabled():
+            if not settings.lambda_event_source_mappings_synchronous():
                 break
             region = arn.split(":")[3]
 

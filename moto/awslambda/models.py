@@ -51,6 +51,12 @@ from moto.utilities.utils import (
     load_resource_as_str,
 )
 
+from .event_source_pollers import (
+    EVENT_SOURCE_MAPPING_HEADER,
+    dynamodb_stream_records,
+    start_polling,
+    stop_polling,
+)
 from .exceptions import (
     ConflictException,
     CrossAccountNotAllowed,
@@ -1034,20 +1040,33 @@ class LambdaFunction(CloudFormationModel, DockerModel):
             return s
 
     def _invoke_external(
-        self, event: Any, invocation_type: str = "RequestResponse"
+        self,
+        event: Any,
+        invocation_type: str = "RequestResponse",
+        event_source_mapping_arn: str | None = None,
     ) -> tuple[str, bool, str]:
-        """Sends the invocation to the Lambda Invoke API at MOTO_LAMBDA_INVOKE_ENDPOINT."""
+        """Sends the invocation to the Lambda Invoke API at MOTO_LAMBDA_INVOKE_ENDPOINT.
+
+        Invocations by an event source mapping carry its ARN in the EVENT_SOURCE_MAPPING_HEADER header.
+        """
         import requests
 
         url = f"{settings.lambda_invoke_endpoint()}/2015-03-31/functions/{self.function_arn}/invocations"
         data = event if isinstance(event, (str, bytes)) else json.dumps(event)
         headers = {"X-Amz-Invocation-Type": "RequestResponse", "X-Amz-Log-Type": "Tail"}
+        if event_source_mapping_arn:
+            headers[EVENT_SOURCE_MAPPING_HEADER] = event_source_mapping_arn
 
         def call() -> tuple[str, bool, str]:
-            resp = requests.post(url, data=data, headers=headers, timeout=float(self.timeout) + 30)
+            resp = requests.post(
+                url, data=data, headers=headers, timeout=float(self.timeout) + 30
+            )
             logs = resp.headers.get("X-Amz-Log-Result", "")
             logs = base64.b64decode(logs).decode("utf-8") if logs else ""
-            errored = bool(resp.headers.get("X-Amz-Function-Error")) or resp.status_code >= 300
+            errored = (
+                bool(resp.headers.get("X-Amz-Function-Error"))
+                or resp.status_code >= 300
+            )
             return resp.text, errored, logs
 
         if invocation_type == "Event":
@@ -1232,7 +1251,9 @@ class LambdaFunction(CloudFormationModel, DockerModel):
         # Get the invocation type:
         if settings.lambda_invoke_endpoint():
             res, errored, logs = self._invoke_external(
-                body, request_headers.get("x-amz-invocation-type", "RequestResponse")
+                body,
+                request_headers.get("x-amz-invocation-type", "RequestResponse"),
+                request_headers.get(EVENT_SOURCE_MAPPING_HEADER.lower()),
             )
         else:
             res, errored, logs = self._invoke_lambda(event=body)
@@ -1442,6 +1463,7 @@ class EventSourceMapping(CloudFormationModel):
 
         self.function_arn: str = spec["FunctionArn"]
         self.last_modified = time.mktime(utcnow().timetuple())
+        self.last_processing_result: str | None = None
 
     def _get_service_source_from_arn(self, event_source_arn: str | None = None) -> str:
         arn = event_source_arn or self.event_source_arn
@@ -1496,7 +1518,7 @@ class EventSourceMapping(CloudFormationModel):
             "EventSourceMappingArn": self.arn,
             "FunctionArn": self.function_arn,
             "LastModified": self.last_modified,
-            "LastProcessingResult": None,
+            "LastProcessingResult": self.last_processing_result,
             "State": "Enabled" if self.enabled else "Disabled",
             "StateTransitionReason": "User initiated",
             "StartingPosition": self.starting_position,
@@ -2138,6 +2160,11 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         self._event_source_mappings: dict[str, EventSourceMapping] = {}
         self._layers = LayerStorage()
 
+    def reset(self) -> None:
+        for esm in self._event_source_mappings.values():
+            stop_polling(esm.arn)
+        super().reset()
+
     def create_alias(
         self,
         name: str,
@@ -2262,8 +2289,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
                         "ResourceConflictException", "The resource already exists."
                     )
                 spec.update({"FunctionArn": func.function_arn})
-                esm = EventSourceMapping(spec)
-                self._event_source_mappings[esm.uuid] = esm
+                esm = self._add_event_source_mapping(spec)
 
                 # Set backend function on queue
                 queue.lambda_event_source_mappings[esm.function_arn] = esm
@@ -2275,8 +2301,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         for ddbstream in ddbstream_backend.list_streams():
             if ddbstream["StreamArn"] == spec["EventSourceArn"]:
                 spec.update({"FunctionArn": func.function_arn})
-                esm = EventSourceMapping(spec)
-                self._event_source_mappings[esm.uuid] = esm
+                esm = self._add_event_source_mapping(spec)
                 table_name = ddbstream["TableName"]
                 table = ddb_backend.get_table(table_name)
                 table.lambda_event_source_mappings[esm.function_arn] = esm
@@ -2288,12 +2313,18 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         for stream in kinesis_backend.streams.values():
             if stream.arn == spec["EventSourceArn"]:
                 spec.update({"FunctionArn": func.function_arn})
-                esm = EventSourceMapping(spec)
-                self._event_source_mappings[esm.uuid] = esm
+                esm = self._add_event_source_mapping(spec)
                 stream.lambda_event_source_mappings[esm.event_source_arn] = esm
                 return esm
 
         raise RESTError("ResourceNotFoundException", "Invalid EventSourceArn")
+
+    def _add_event_source_mapping(self, spec: dict[str, Any]) -> EventSourceMapping:
+        esm = EventSourceMapping(spec)
+        self._event_source_mappings[esm.uuid] = esm
+        if settings.lambda_event_source_polling():
+            start_polling(esm)
+        return esm
 
     def publish_layer_version(self, spec: dict[str, Any]) -> LayerVersion:
         required = ["LayerName", "Content"]
@@ -2343,7 +2374,10 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         return self._event_source_mappings.get(uuid)
 
     def delete_event_source_mapping(self, uuid: str) -> EventSourceMapping | None:
-        return self._event_source_mappings.pop(uuid, None)
+        esm = self._event_source_mappings.pop(uuid, None)
+        if esm is not None:
+            stop_polling(esm.arn)
+        return esm
 
     def update_event_source_mapping(
         self, uuid: str, spec: dict[str, Any]
@@ -2544,30 +2578,7 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
     def send_dynamodb_items(
         self, function_arn: str, items: list[Any], source: str
     ) -> str | bytes:
-        from moto.core.utils import unix_time
-
-        records = []
-        for item in items:
-            record = item.to_json()
-            # Shallow copy to avoid mutating the original StreamRecord
-            dynamodb = dict(record["dynamodb"])
-            # Convert datetime to epoch for the Lambda event payload
-            if isinstance(dynamodb.get("ApproximateCreationDateTime"), datetime):
-                dynamodb["ApproximateCreationDateTime"] = unix_time(
-                    dynamodb["ApproximateCreationDateTime"]
-                )
-            records.append(
-                {
-                    "eventID": record["eventID"],
-                    "eventName": record["eventName"],
-                    "eventVersion": record["eventVersion"],
-                    "eventSource": record["eventSource"],
-                    "awsRegion": self.region_name,
-                    "dynamodb": dynamodb,
-                    "eventSourceARN": source,
-                }
-            )
-        event = {"Records": records}
+        event = {"Records": dynamodb_stream_records(items, source, self.region_name)}
         func = self._lambdas.get_arn(function_arn)
         return func.invoke(json.dumps(event), {}, {})  # type: ignore[union-attr]
 

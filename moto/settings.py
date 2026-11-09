@@ -131,6 +131,24 @@ def lambda_event_source_mappings_disabled() -> bool:
     )
 
 
+def lambda_event_source_polling() -> bool:
+    """Poll SQS, Kinesis and DynamoDB Streams event sources in background threads, as Lambda does.
+
+    Without it, moto invokes the function inside the SendMessage/PutRecord/PutItem call that produced the record.
+    """
+    return (
+        os.environ.get("MOTO_LAMBDA_EVENT_SOURCE_POLLING", "false").lower() == "true"
+        and not lambda_event_source_mappings_disabled()
+    )
+
+
+def lambda_event_source_mappings_synchronous() -> bool:
+    """Whether moto delivers event source mapping records to functions inside the call that produced them."""
+    return not (
+        lambda_event_source_mappings_disabled() or lambda_event_source_polling()
+    )
+
+
 def glue_job_run_endpoint() -> str | None:
     """URL that runs Glue job runs: moto POSTs each new run there and records the outcome."""
     return os.environ.get("MOTO_GLUE_JOB_RUN_ENDPOINT") or None
