@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime
 import ipaddress
 import json
 import re
@@ -66,6 +67,16 @@ def get_secrets_manager_backend(account_id: str, region: str) -> SecretsManagerB
     return secretsmanager_backends[account_id][region]
 
 
+class _InputText(str):
+    """A target's Input, delivered as the exact text."""
+
+
+def _body(event: Any) -> str:
+    if isinstance(event, _InputText):
+        return str(event)
+    return json.dumps(event, default=str)
+
+
 class Rule(CloudFormationModel):
     def __init__(
         self,
@@ -92,6 +103,7 @@ class Rule(CloudFormationModel):
         self.state = state or "ENABLED"
         self.managed_by = managed_by  # can only be set by AWS services
         self.created_by = account_id
+        self.created = datetime.datetime.now(datetime.timezone.utc)
         self.targets = targets or []
 
     @property
@@ -143,9 +155,20 @@ class Rule(CloudFormationModel):
     def send_to_targets(
         self, original_event: EventMessageType, transform_input: bool = True
     ) -> None:
+        if self.state == "DISABLED":
+            return
+        if self.scheduled_expression and not self.event_pattern.get_pattern():
+            # A rule with only a ScheduleExpression runs on its schedule, never on events
+            return
         if not self.event_pattern.matches_event(original_event):
             return
+        self._deliver(original_event, transform_input)
 
+    def send_scheduled_event(self, event: dict[str, Any]) -> None:
+        """Delivers the 'Scheduled Event' of a rule with a ScheduleExpression to its targets."""
+        self._deliver(event, transform_input=True)  # type: ignore[arg-type]
+
+    def _deliver(self, original_event: EventMessageType, transform_input: bool) -> None:
         # supported targets
         # - CloudWatch Log Group
         # - EventBridge Archive
@@ -177,7 +200,15 @@ class Rule(CloudFormationModel):
                 ),
             }  # type: ignore[assignment]
 
-        if transform_input:
+        event: Any
+        if transform_input and "Input" in target:
+            event = _InputText(target["Input"])
+        elif transform_input and "InputPath" in target:
+            from jsonpath_ng.ext import parse
+
+            matches = parse(target["InputPath"]).find(original_event)  # type: ignore[no-untyped-call]
+            event = matches[0].value if matches else None
+        elif transform_input:
             input_transformer = target.get("InputTransformer", {})
             event = EventTemplateParser.parse(
                 input_template=input_transformer.get("InputTemplate"),
@@ -234,7 +265,7 @@ class Rule(CloudFormationModel):
         from moto.stepfunctions.responses import get_backend
 
         get_backend(self.account_id, self.region_name).start_execution(
-            state_machine_arn, name=None, execution_input=json.dumps(event, default=str)
+            state_machine_arn, name=None, execution_input=_body(event)
         )
 
     def _send_to_firehose(
@@ -243,41 +274,41 @@ class Rule(CloudFormationModel):
         from moto.firehose.models import firehose_backends
 
         firehose_backends[self.account_id][self.region_name].put_record(
-            delivery_stream_name, {"Data": json.dumps(event, default=str).encode()}
+            delivery_stream_name, {"Data": _body(event).encode()}
         )
 
     def _send_to_lambda(self, function_arn: str, event: dict[str, Any]) -> None:
         from moto.awslambda.utils import get_backend
 
-        if isinstance(event.get("time"), (int, float)):
+        if isinstance(event, dict) and isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(event["time"])
             )
         fn = get_backend(self.account_id, self.region_name).get_function(function_arn)
         # EventBridge invokes Lambda targets asynchronously
-        fn.invoke(json.dumps(event), {"x-amz-invocation-type": "Event"}, {})
+        fn.invoke(_body(event), {"x-amz-invocation-type": "Event"}, {})
 
     def _send_to_sns_topic(self, topic_arn: str, event: dict[str, Any]) -> None:
         from moto.sns import sns_backends
 
-        if isinstance(event.get("time"), (int, float)):
+        if isinstance(event, dict) and isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(event["time"])
             )
         sns_backends[self.account_id][self.region_name].publish(
-            message=json.dumps(event), arn=topic_arn
+            message=_body(event), arn=topic_arn
         )
 
     def _send_to_cw_log_group(self, name: str, event: dict[str, Any]) -> None:
         from moto.logs import logs_backends
 
-        if isinstance(event.get("time"), (int, float)):
+        if isinstance(event, dict) and isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(event["time"])
             )
 
         log_stream_name = str(random.uuid4())
-        log_events = [{"timestamp": unix_time_millis(), "message": json.dumps(event)}]
+        log_events = [{"timestamp": unix_time_millis(), "message": _body(event)}]
 
         log_backend = logs_backends[self.account_id][self.region_name]
         log_backend.create_log_stream(name, log_stream_name)
@@ -375,7 +406,7 @@ class Rule(CloudFormationModel):
     ) -> None:
         from moto.sqs import sqs_backends
 
-        if isinstance(event.get("time"), (int, float)):
+        if isinstance(event, dict) and isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(float(event["time"]))  # type: ignore[arg-type]
             )
@@ -395,7 +426,7 @@ class Rule(CloudFormationModel):
 
         sqs_backends[self.account_id][self.region_name].send_message(
             queue_name=resource_id,
-            message_body=json.dumps(event),
+            message_body=_body(event),
             group_id=group_id,
         )
 
@@ -1340,6 +1371,8 @@ class EventsBackend(BaseBackend, TaggableResourcesMixin):
 
      - AWSLambda functions
 
+    Rules with a ScheduleExpression run on their schedule when MOTO_SCHEDULER_FIRE=true; see the scheduler service.
+
     Please let us know if you want support for an event/target that is not yet listed here.
     """
 
@@ -1443,6 +1476,10 @@ class EventsBackend(BaseBackend, TaggableResourcesMixin):
             targets=targets,
         )
         event_bus.rules[name] = rule
+        if scheduled_expression:
+            from moto.scheduler.runner import start_if_enabled
+
+            start_if_enabled()
 
         if tags:
             self.tagger.tag_resource(rule.arn, tags)

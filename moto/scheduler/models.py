@@ -16,6 +16,7 @@ from .exceptions import (
     ScheduleNotFound,
     ValidationException,
 )
+from .runner import start_if_enabled
 
 
 class Schedule(CloudFormationModel):
@@ -172,16 +173,18 @@ class Schedule(CloudFormationModel):
         start_date: str,
         state: str,
         target: dict[str, Any],
+        action_after_completion: str | None = None,
     ) -> None:
         self.schedule_expression = schedule_expression
         self.schedule_expression_timezone = schedule_expression_timezone or "UTC"
         self.flexible_time_window = flexible_time_window
         self.target = Schedule.validate_target(target)
         self.description = description
-        self.state = state
+        self.state = state or "ENABLED"
         self.kms_key_arn = kms_key_arn
         self.start_date = start_date
         self.end_date = end_date
+        self.action_after_completion = action_after_completion
         self.last_modified_date = unix_time()
 
 
@@ -274,7 +277,22 @@ class ScheduleGroup(CloudFormationModel):
 
 
 class EventBridgeSchedulerBackend(BaseBackend):
-    """Implementation of EventBridgeScheduler APIs."""
+    """Implementation of EventBridgeScheduler APIs.
+
+    Schedules are stored but not run by default. With ``MOTO_SCHEDULER_FIRE=true``, a background
+    thread invokes the target of every ENABLED schedule when it is due, and the targets of
+    EventBridge rules that have a ScheduleExpression:
+
+     - ``rate()``, ``cron()`` (in ScheduleExpressionTimezone) and one-time ``at()`` expressions
+     - StartDate, EndDate and ActionAfterCompletion=DELETE
+     - templated targets that EventBridge rules can deliver to (Lambda, SQS, SNS, Step Functions,
+       Firehose, CloudWatch Logs), EventBridge PutEvents, and universal ``aws-sdk`` targets
+     - the target's Input, with ``<aws.scheduler.*>`` context attributes filled in, or ``{}``
+
+    Invocations happen at the start of the FlexibleTimeWindow. RoleArn, RetryPolicy and
+    DeadLetterConfig are not used. ``MOTO_SCHEDULER_TICK_SECONDS`` (default 1) sets how often
+    due schedules are checked.
+    """
 
     PAGINATION_MODEL = {
         "list_schedule_groups": {
@@ -339,6 +357,7 @@ class EventBridgeSchedulerBackend(BaseBackend):
             action_after_completion=action_after_completion,
         )
         group.add_schedule(schedule)
+        start_if_enabled()
         return schedule
 
     def get_schedule(self, group_name: str | None, name: str) -> Schedule:
@@ -362,6 +381,7 @@ class EventBridgeSchedulerBackend(BaseBackend):
         start_date: str,
         state: str,
         target: dict[str, Any],
+        action_after_completion: str | None = None,
     ) -> Schedule:
         """
         The ClientToken is not yet implemented
@@ -377,7 +397,9 @@ class EventBridgeSchedulerBackend(BaseBackend):
             start_date=start_date,
             state=state,
             target=target,
+            action_after_completion=action_after_completion,
         )
+        start_if_enabled()
         return schedule
 
     @paginate(pagination_model=PAGINATION_MODEL)
