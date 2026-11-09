@@ -288,6 +288,54 @@ def _expand_prefix(prefix: str, keys: dict[str, str], now: Any) -> str:
     return re.sub(r"!\{([^}]*)\}", evaluate, prefix)
 
 
+def _arrow_value(value: Any, arrow_type: Any) -> Any:
+    """A JSON value as pyarrow takes it for a column of arrow_type."""
+    import datetime
+    import decimal
+
+    import pyarrow as pa
+
+    if value is None:
+        return None
+    if pa.types.is_timestamp(arrow_type) and isinstance(value, str):
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if arrow_type.tz is None and parsed.tzinfo is not None:
+            parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return parsed
+    if pa.types.is_timestamp(arrow_type) and isinstance(value, (int, float)):
+        return datetime.datetime.fromtimestamp(value / 1000, datetime.timezone.utc)
+    if pa.types.is_date(arrow_type) and isinstance(value, str):
+        return datetime.date.fromisoformat(value[:10])
+    if pa.types.is_decimal(arrow_type):
+        return decimal.Decimal(str(value))
+    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return value if isinstance(value, str) else json.dumps(value)
+    if pa.types.is_struct(arrow_type) and isinstance(value, dict):
+        return {
+            arrow_type.field(i).name: _arrow_value(
+                value.get(arrow_type.field(i).name), arrow_type.field(i).type
+            )
+            for i in range(arrow_type.num_fields)
+        }
+    if pa.types.is_list(arrow_type) and isinstance(value, list):
+        return [_arrow_value(v, arrow_type.value_type) for v in value]
+    if pa.types.is_map(arrow_type) and isinstance(value, dict):
+        return [(k, _arrow_value(v, arrow_type.item_type)) for k, v in value.items()]
+    return value
+
+
+def _arrow_rows(rows: list[dict[str, Any]], schema: Any) -> Any:
+    import pyarrow as pa
+
+    return pa.Table.from_pylist(
+        [
+            {f.name: _arrow_value(row.get(f.name), f.type) for f in schema}
+            for row in rows
+        ],
+        schema=schema,
+    )
+
+
 class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
     """Implementation of Firehose APIs."""
 
@@ -676,6 +724,67 @@ class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
             return {}
         return {k: "" if v is None else str(v) for k, v in (result or {}).items()}
 
+    def put_iceberg_records(
+        self, destination: dict[str, Any], records: list[dict[str, bytes]]
+    ) -> list[dict[str, str]]:
+        """Appends records to the destination's Glue Iceberg tables with the Athena SQL engine's catalog.
+
+        Each record goes to the table the MetadataExtraction query names (destinationDatabaseName,
+        destinationTableName), or to the only table in DestinationTableConfigurationList. Fields the
+        table lacks are dropped, as with schema evolution off.
+        """
+        try:
+            from moto.athena.sql_engine import _LOCK, SqlEngine
+        except ImportError as exc:
+            warnings.warn(
+                f"Firehose Iceberg delivery needs the Athena SQL engine's packages: {exc}",
+                stacklevel=2,
+            )
+            return []
+        processors = (destination.get("ProcessingConfiguration") or {}).get(
+            "Processors"
+        ) or []
+        query = next(
+            (
+                p["ParameterValue"]
+                for processor in processors
+                if processor.get("Type") == "MetadataExtraction"
+                for p in processor.get("Parameters") or []
+                if p["ParameterName"] == "MetadataExtractionQuery"
+            ),
+            None,
+        )
+        tables = destination.get("DestinationTableConfigurationList") or []
+        default = (
+            (tables[0]["DestinationDatabaseName"], tables[0]["DestinationTableName"])
+            if len(tables) == 1
+            else None
+        )
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for record in records:
+            row = json.loads(record["Data"])
+            keys = self._partition_keys(query, record["Data"]) if query else {}
+            target = (
+                (keys["destinationDatabaseName"], keys["destinationTableName"])
+                if keys.get("destinationDatabaseName")
+                and keys.get("destinationTableName")
+                else default
+            )
+            if target is None:
+                warnings.warn(
+                    "Firehose could not route a record to an Iceberg table",
+                    stacklevel=2,
+                )
+                continue
+            groups.setdefault(target, []).append(row)
+        engine = SqlEngine(self.account_id, self.region_name)
+        for (database, name), rows in groups.items():
+            with _LOCK:
+                table = engine.catalog.load_table((database, name))
+                schema = table.schema().as_arrow()
+                table.append(_arrow_rows(rows, schema))
+        return [{"RecordId": str(mock_random.uuid4())} for _ in range(len(records))]
+
     def put_record_batch(
         self, delivery_stream_name: str, records: list[dict[str, bytes]]
     ) -> dict[str, Any]:
@@ -711,6 +820,10 @@ class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
                 request_responses = self.put_http_records(
                     destination["HttpEndpoint"], records
                 )
+            elif "Iceberg" in destination:
+                request_responses = self.put_iceberg_records(
+                    destination["Iceberg"], records
+                )
             elif {"Elasticsearch", "Redshift", "Snowflake"} & set(destination):
                 # This isn't implemented as these services aren't implemented,
                 # so ignore the data, but return a "proper" response.
@@ -718,6 +831,11 @@ class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
                     {"RecordId": str(mock_random.uuid4())} for _ in range(len(records))
                 ]
 
+        if len(request_responses) != len(records):
+            # Destinations moto does not deliver to still accept the records
+            request_responses = [
+                {"RecordId": str(mock_random.uuid4())} for _ in range(len(records))
+            ]
         return {
             "FailedPutCount": 0,
             "Encrypted": False,
