@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import re
 from datetime import datetime
 from unittest import SkipTest, mock
 
@@ -318,6 +319,7 @@ def test_input_transformer_substitutes_json_values_and_missing_paths():
         State="ENABLED",
     )
     template = """{
+        "time": "<time>",
         "name": "<name>",
         "greeting": "hello <name>, from <missing>",
         "quoted_missing": "<missing>",
@@ -334,6 +336,7 @@ def test_input_transformer_substitutes_json_values_and_missing_paths():
                 "Arn": queue_arn,
                 "InputTransformer": {
                     "InputPathsMap": {
+                        "time": "$.time",
                         "name": "$.detail.name",
                         "details": "$.detail.details",
                         "nulled": "$.detail.nulled",
@@ -365,7 +368,10 @@ def test_input_transformer_substitutes_json_values_and_missing_paths():
 
     response = client_sqs.receive_message(QueueUrl=queue_url)
     body = json.loads(response["Messages"][0]["Body"])
+    # EventBridge writes the event's time as an ISO 8601 timestamp
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", body["time"])
     assert body == {
+        "time": body["time"],
         "name": 'say "hi"',
         "greeting": 'hello say "hi", from ',
         "quoted_missing": "",

@@ -168,6 +168,14 @@ class Rule(CloudFormationModel):
         transform_input: bool,
     ) -> None:
         arn = parse_arn(target["Arn"])
+        if isinstance(original_event.get("time"), (int, float)):
+            # Every target sees the event's time as EventBridge writes it
+            original_event = {
+                **original_event,
+                "time": iso_8601_datetime_without_milliseconds(
+                    utcfromtimestamp(original_event["time"])
+                ),
+            }  # type: ignore[assignment]
 
         if transform_input:
             input_transformer = target.get("InputTransformer", {})
@@ -241,7 +249,7 @@ class Rule(CloudFormationModel):
     def _send_to_lambda(self, function_arn: str, event: dict[str, Any]) -> None:
         from moto.awslambda.utils import get_backend
 
-        if "time" in event:
+        if isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(event["time"])
             )
@@ -252,7 +260,7 @@ class Rule(CloudFormationModel):
     def _send_to_sns_topic(self, topic_arn: str, event: dict[str, Any]) -> None:
         from moto.sns import sns_backends
 
-        if "time" in event:
+        if isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(event["time"])
             )
@@ -263,7 +271,7 @@ class Rule(CloudFormationModel):
     def _send_to_cw_log_group(self, name: str, event: dict[str, Any]) -> None:
         from moto.logs import logs_backends
 
-        if "time" in event:
+        if isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(event["time"])
             )
@@ -367,7 +375,7 @@ class Rule(CloudFormationModel):
     ) -> None:
         from moto.sqs import sqs_backends
 
-        if "time" in event:
+        if isinstance(event.get("time"), (int, float)):
             event["time"] = iso_8601_datetime_without_milliseconds(
                 utcfromtimestamp(float(event["time"]))  # type: ignore[arg-type]
             )
