@@ -793,8 +793,9 @@ def test_query_state_change_events(athena: Any) -> None:
     succeeded = run(athena, "SELECT 1")["QueryExecutionId"]
     failed = run(athena, "SELECT * FROM missing", expect="FAILED")["QueryExecutionId"]
 
+    # Queries of earlier tests can send their events to this rule too
     received: dict[str, Any] = {}
-    while len(received) < 2:
+    while not {succeeded, failed} <= set(received):
         messages = sqs.receive_message(
             QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=5
         ).get("Messages")
@@ -805,3 +806,4 @@ def test_query_state_change_events(athena: Any) -> None:
     assert received[succeeded]["detail"]["currentState"] == "SUCCEEDED"
     assert received[succeeded]["detail"]["workgroupName"] == "primary"
     assert received[failed]["detail"]["currentState"] == "FAILED"
+    assert "ingestion-time" not in received[succeeded]

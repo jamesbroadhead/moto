@@ -110,7 +110,7 @@ class EventTemplateParser:
             matches = input_expr.find(event)
             values[input_path] = matches[0].value if matches else None
         values["aws.events.event.json"] = event
-        values["aws.events.event.ingestion-time"] = event["ingestion-time"]
+        values["aws.events.event.ingestion-time"] = event.get("ingestion-time")
 
         def text_of(value: Any) -> str:
             if value is None:

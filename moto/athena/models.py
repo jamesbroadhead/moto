@@ -488,6 +488,7 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
             "time": execution.end_time,
             "region": self.region_name,
             "resources": [],
+            "ingestion-time": time.time(),
             "detail": {
                 "currentState": state,
                 "previousState": "RUNNING",
