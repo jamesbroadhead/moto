@@ -305,6 +305,78 @@ def test_send_to_sqs_queue_with_input_transformer():
 
 
 @mock_aws
+def test_input_transformer_substitutes_json_values_and_missing_paths():
+    client_events = boto3.client("events", "eu-central-1")
+    client_sqs = boto3.client("sqs", region_name="eu-central-1")
+    queue_url = client_sqs.create_queue(QueueName="test-queue")["QueueUrl"]
+    queue_arn = client_sqs.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    client_events.put_rule(
+        Name="test-rule",
+        EventPattern=json.dumps({"account": [ACCOUNT_ID]}),
+        State="ENABLED",
+    )
+    template = """{
+        "name": "<name>",
+        "greeting": "hello <name>, from <missing>",
+        "quoted_missing": "<missing>",
+        "details": <details>,
+        "nothing": <nulled>,
+        "absent": <missing>,
+        "count": <count>
+    }"""
+    client_events.put_targets(
+        Rule="test-rule",
+        Targets=[
+            {
+                "Id": "sqs",
+                "Arn": queue_arn,
+                "InputTransformer": {
+                    "InputPathsMap": {
+                        "name": "$.detail.name",
+                        "details": "$.detail.details",
+                        "nulled": "$.detail.nulled",
+                        "missing": "$.detail.missing",
+                        "count": "$.detail.count",
+                    },
+                    "InputTemplate": template,
+                },
+            }
+        ],
+    )
+
+    client_events.put_events(
+        Entries=[
+            {
+                "Source": "source",
+                "DetailType": "type",
+                "Detail": json.dumps(
+                    {
+                        "name": 'say "hi"',
+                        "details": {"a": [1, 2]},
+                        "nulled": None,
+                        "count": 3,
+                    }
+                ),
+            }
+        ]
+    )
+
+    response = client_sqs.receive_message(QueueUrl=queue_url)
+    body = json.loads(response["Messages"][0]["Body"])
+    assert body == {
+        "name": 'say "hi"',
+        "greeting": 'hello say "hi", from ',
+        "quoted_missing": "",
+        "details": {"a": [1, 2]},
+        "nothing": None,
+        "absent": None,
+        "count": 3,
+    }
+
+
+@mock_aws
 def test_send_to_sqs_queue_with_input_transformer_on_custom_event_bus():
     # given
     client_events = boto3.client("events", "eu-central-1")

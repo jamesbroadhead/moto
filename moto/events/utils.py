@@ -104,21 +104,52 @@ class EventTemplateParser:
         input_paths_map = (
             input_paths_map or EventTemplateParser.DEFAULT_EVENT_INPUT_PATHS_MAP
         )
+        values: dict[str, Any] = {}
         for input_path in input_paths_map:
             input_expr = parse(input_paths_map[input_path])  # type: ignore[no-untyped-call]
             matches = input_expr.find(event)
-            result = (
-                EventTemplateParser._stringify(matches[0].value) if matches else None
-            )
-            if result:
-                template_to_use = template_to_use.replace(f"<{input_path}>", result)
+            values[input_path] = matches[0].value if matches else None
+        values["aws.events.event.json"] = event
+        values["aws.events.event.ingestion-time"] = event["ingestion-time"]
 
-        default_inputs_map = {
-            "aws.events.event.json": event,
-            "aws.events.event.ingestion-time": event["ingestion-time"],
-        }
-        for input_path in default_inputs_map:
-            result = EventTemplateParser._stringify(default_inputs_map[input_path])
-            template_to_use = template_to_use.replace(f"<{input_path}>", result)
+        def text_of(value: Any) -> str:
+            if value is None:
+                return ""
+            return (
+                value
+                if isinstance(value, str)
+                else EventTemplateParser._stringify(value)
+            )
+
+        template_is_json = template_to_use.lstrip().startswith(("{", "["))
+        out: list[str] = []
+        in_string = False
+        i = 0
+        while i < len(template_to_use):
+            char = template_to_use[i]
+            if char == "<":
+                end = template_to_use.find(">", i)
+                name = template_to_use[i + 1 : end] if end != -1 else ""
+                if name in values:
+                    value = values[name]
+                    if not template_is_json:
+                        out.append(text_of(value))
+                    elif in_string:
+                        # Inside a JSON string the value is spliced in as text; a missing value is empty.
+                        out.append(json.dumps(text_of(value))[1:-1])
+                    else:
+                        # A bare placeholder takes the value as JSON; a missing value is null.
+                        out.append(json.dumps(value))
+                    i = end + 1
+                    continue
+            elif char == "\\" and in_string:
+                out.append(template_to_use[i : i + 2])
+                i += 2
+                continue
+            elif char == '"':
+                in_string = not in_string
+            out.append(char)
+            i += 1
+        template_to_use = "".join(out)
 
         return json.loads(template_to_use)
