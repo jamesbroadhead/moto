@@ -206,10 +206,22 @@ def test_send_to_sqs_queue():
     assert body["id"] is not None
     assert body["detail-type"] == "type"
     assert body["source"] == "source"
+    assert body["account"] == ACCOUNT_ID
     assert body["time"] == iso_8601_datetime_without_milliseconds(event_time)
     assert body["region"] == "eu-central-1"
     assert body["resources"] == []
     assert body["detail"] == {"key": "value"}
+    assert list(body) == [
+        "version",
+        "id",
+        "detail-type",
+        "source",
+        "account",
+        "time",
+        "region",
+        "resources",
+        "detail",
+    ]
 
 
 @mock_aws

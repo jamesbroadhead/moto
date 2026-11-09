@@ -70,7 +70,7 @@ _BASE_EVENT_MESSAGE: EventMessageType = {
 
 
 class EventTemplateParser:
-    DEFAULT_EVENT_INPUT_TEMPLATE = '{"id": "<id>", "time": <time>, "version": "0", "detail-type": "<detail-type>", "source": "<source>", "region": "<region>", "resources": <resources>, "detail": <detail>}'
+    DEFAULT_EVENT_INPUT_TEMPLATE = '{"version": "0", "id": "<id>", "detail-type": "<detail-type>", "source": "<source>", "account": "<account>", "time": <time>, "region": "<region>", "resources": <resources>, "detail": <detail>}'
     DEFAULT_EVENT_INPUT_PATHS_MAP = {
         "account": "$.account",
         "detail": "$.detail",
