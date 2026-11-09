@@ -107,6 +107,13 @@ class StateMachineVersion(StateMachineInstance, CloudFormationModel):
         self.description = description
 
 
+def _cloudformation_backend(account_id: str, region_name: str) -> "StepFunctionBackend":
+    """The backend the API serves, so that state machines from CloudFormation can run when execution is on."""
+    from .responses import get_backend
+
+    return get_backend(account_id, region_name)
+
+
 class StateMachine(StateMachineInstance, CloudFormationModel):
     def __init__(
         self,
@@ -294,7 +301,7 @@ class StateMachine(StateMachineInstance, CloudFormationModel):
         definition = properties.get("DefinitionString", "")
         role_arn = properties.get("RoleArn", "")
         tags = cfn_to_api_tags(properties.get("Tags", []))
-        sf_backend = stepfunctions_backends[account_id][region_name]
+        sf_backend = _cloudformation_backend(account_id, region_name)
         return sf_backend.create_state_machine(name, definition, role_arn, tags=tags)
 
     @classmethod
@@ -305,7 +312,7 @@ class StateMachine(StateMachineInstance, CloudFormationModel):
         account_id: str,
         region_name: str,
     ) -> None:
-        sf_backend = stepfunctions_backends[account_id][region_name]
+        sf_backend = _cloudformation_backend(account_id, region_name)
         sf_backend.delete_state_machine(resource_name)
 
     @classmethod
@@ -337,7 +344,7 @@ class StateMachine(StateMachineInstance, CloudFormationModel):
             definition = properties.get("DefinitionString")
             role_arn = properties.get("RoleArn")
             tags = cfn_to_api_tags(properties.get("Tags", []))
-            sf_backend = stepfunctions_backends[account_id][region_name]
+            sf_backend = _cloudformation_backend(account_id, region_name)
             state_machine = sf_backend.update_state_machine(
                 original_resource.arn, definition=definition, role_arn=role_arn
             )

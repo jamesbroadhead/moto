@@ -149,61 +149,101 @@ class Rule(CloudFormationModel):
         # - SQS Queue + FIFO Queue
         # - Cross-region/account EventBus
         for target in self.targets:
-            arn = parse_arn(target["Arn"])
-
-            if transform_input:
-                input_transformer = target.get("InputTransformer", {})
-                event = EventTemplateParser.parse(
-                    input_template=input_transformer.get("InputTemplate"),
-                    input_paths_map=input_transformer.get("InputPathsMap", {}),
-                    event=original_event,
+            # A target that fails does not stop delivery to the rule's other targets, as in EventBridge.
+            try:
+                self._send_to_target(target, original_event, transform_input)
+            except Exception as e:
+                warnings.warn(
+                    f"EventBridge could not deliver to {target['Arn']}: {e!r}",
+                    stacklevel=2,
                 )
-            else:
-                event = original_event.copy()  # type: ignore[assignment]
 
-            if arn.service == "logs" and arn.resource_type == "log-group":
-                self._send_to_cw_log_group(arn.resource_id, event)
-            elif arn.service == "events" and not arn.resource_type:
-                archive_arn = parse_arn(event["archive-arn"])
+    def _send_to_target(
+        self,
+        target: dict[str, Any],
+        original_event: EventMessageType,
+        transform_input: bool,
+    ) -> None:
+        arn = parse_arn(target["Arn"])
 
-                self._send_to_events_archive(archive_arn.resource_id, original_event)
-            elif arn.service == "sqs":
-                group_id = target.get("SqsParameters", {}).get("MessageGroupId")
-                self._send_to_sqs_queue(arn.resource_id, event, group_id)
-            elif arn.service == "lambda":
-                self._send_to_lambda(target["Arn"], event)
-            elif arn.service == "sns":
-                self._send_to_sns_topic(target["Arn"], event)
-            elif arn.service == "events" and arn.resource_type == "event-bus":
-                cross_account_backend: EventsBackend = events_backends[arn.account][
-                    arn.region
-                ]
-                new_event = {
-                    "Source": event["source"],
-                    "DetailType": event["detail-type"],
-                    "Detail": json.dumps(event["detail"]),
-                    "EventBusName": arn.resource_id,
-                }
-                cross_account_backend.put_events([new_event])
-            elif arn.service == "events" and arn.resource_type == "api-destination":
-                if settings.events_invoke_http():
-                    api_destination = self._find_api_destination(arn.resource_id)
-                    request_parameters = target.get("HttpParameters", {})
-                    headers = request_parameters.get("HeaderParameters", {})
-                    qs_params = request_parameters.get("QueryStringParameters", {})
-                    query_string = "&".join(
-                        [f"{key}={val}" for key, val in qs_params.items()]
-                    )
-                    url = api_destination.invocation_endpoint + (
-                        f"?{query_string}" if query_string else ""
-                    )
-                    requests.request(
-                        method=api_destination.http_method,
-                        url=url,
-                        headers=headers,
-                    )
-            else:
-                raise NotImplementedError(f"Expr not defined for {type(self)}")
+        if transform_input:
+            input_transformer = target.get("InputTransformer", {})
+            event = EventTemplateParser.parse(
+                input_template=input_transformer.get("InputTemplate"),
+                input_paths_map=input_transformer.get("InputPathsMap", {}),
+                event=original_event,
+            )
+        else:
+            event = original_event.copy()  # type: ignore[assignment]
+
+        if arn.service == "logs" and arn.resource_type == "log-group":
+            self._send_to_cw_log_group(arn.resource_id, event)
+        elif arn.service == "events" and not arn.resource_type:
+            archive_arn = parse_arn(event["archive-arn"])
+
+            self._send_to_events_archive(archive_arn.resource_id, original_event)
+        elif arn.service == "sqs":
+            group_id = target.get("SqsParameters", {}).get("MessageGroupId")
+            self._send_to_sqs_queue(arn.resource_id, event, group_id)
+        elif arn.service == "lambda":
+            self._send_to_lambda(target["Arn"], event)
+        elif arn.service == "sns":
+            self._send_to_sns_topic(target["Arn"], event)
+        elif arn.service == "events" and arn.resource_type == "event-bus":
+            cross_account_backend: EventsBackend = events_backends[arn.account][
+                arn.region
+            ]
+            new_event = {
+                "Source": event["source"],
+                "DetailType": event["detail-type"],
+                "Detail": json.dumps(event["detail"]),
+                "EventBusName": arn.resource_id,
+            }
+            cross_account_backend.put_events([new_event])
+        elif arn.service == "events" and arn.resource_type == "api-destination":
+            if settings.events_invoke_http():
+                api_destination = self._find_api_destination(arn.resource_id)
+                request_parameters = target.get("HttpParameters", {})
+                headers = request_parameters.get("HeaderParameters", {})
+                qs_params = request_parameters.get("QueryStringParameters", {})
+                query_string = "&".join(
+                    [f"{key}={val}" for key, val in qs_params.items()]
+                )
+                url = api_destination.invocation_endpoint + (
+                    f"?{query_string}" if query_string else ""
+                )
+                requests.request(
+                    method=api_destination.http_method,
+                    url=url,
+                    headers=headers,
+                )
+        elif arn.service == "states" and arn.resource_type == "stateMachine":
+            self._send_to_sfn_state_machine(target["Arn"], event)
+        elif arn.service == "firehose" or arn.service == "kinesisfirehose":
+            self._send_to_firehose(arn.resource_id, event)
+        else:
+            # Keep delivering to the rule's other targets.
+            warnings.warn(
+                f"EventBridge target {target['Arn']} is not supported", stacklevel=2
+            )
+
+    def _send_to_sfn_state_machine(
+        self, state_machine_arn: str, event: dict[str, Any]
+    ) -> None:
+        from moto.stepfunctions.responses import get_backend
+
+        get_backend(self.account_id, self.region_name).start_execution(
+            state_machine_arn, name=None, execution_input=json.dumps(event, default=str)
+        )
+
+    def _send_to_firehose(
+        self, delivery_stream_name: str, event: dict[str, Any]
+    ) -> None:
+        from moto.firehose.models import firehose_backends
+
+        firehose_backends[self.account_id][self.region_name].put_record(
+            delivery_stream_name, {"Data": json.dumps(event, default=str).encode()}
+        )
 
     def _send_to_lambda(self, function_arn: str, event: dict[str, Any]) -> None:
         from moto.awslambda.utils import get_backend
