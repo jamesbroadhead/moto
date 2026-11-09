@@ -114,6 +114,15 @@ def lambda_invoke_endpoint() -> str | None:
     return os.environ.get("MOTO_LAMBDA_INVOKE_ENDPOINT") or None
 
 
+def bedrock_agentcore_invoke_endpoint() -> str | None:
+    """Base URL of a server that runs AgentCore runtimes; InvokeAgentRuntime forwards to it.
+
+    Requests go to ``{endpoint}/runtimes/{url-encoded runtime ARN}/invocations?qualifier=...``
+    with the payload, content type and session id headers, as AgentCore sends them to the runtime.
+    """
+    return os.environ.get("MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT") or None
+
+
 def lambda_event_source_mappings_disabled() -> bool:
     """Leave event source mappings to an external poller: moto then does not invoke functions for them."""
     return (

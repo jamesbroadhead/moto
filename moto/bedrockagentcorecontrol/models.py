@@ -4,7 +4,7 @@ from collections import OrderedDict
 from typing import Any
 
 from moto.core.base_backend import BackendDict, BaseBackend
-from moto.core.common_models import BaseModel
+from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.utils import utcnow
 from moto.moto_api._internal import mock_random
 from moto.moto_api._internal.managed_state_model import ManagedState
@@ -14,7 +14,7 @@ from moto.utilities.utils import get_partition
 from .exceptions import ConflictException, ResourceNotFoundException
 
 
-class AgentRuntime(BaseModel, ManagedState):
+class AgentRuntime(CloudFormationModel, ManagedState):
     def __init__(
         self,
         region_name: str,
@@ -111,6 +111,97 @@ class AgentRuntime(BaseModel, ManagedState):
         self.status = "UPDATING"
         self._snapshot_version()
 
+    @property
+    def physical_resource_id(self) -> str:
+        return self.agent_runtime_id
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "AgentRuntimeName"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-runtime.html
+        return "AWS::BedrockAgentCore::Runtime"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "AgentRuntime":
+        properties = cloudformation_json.get("Properties", {})
+        backend = bedrockagentcorecontrol_backends[account_id][region_name]
+        return backend.create_agent_runtime(
+            agent_runtime_name=properties.get("AgentRuntimeName") or resource_name,
+            agent_runtime_artifact=_lower_first_keys(
+                properties.get("AgentRuntimeArtifact", {})
+            ),
+            role_arn=properties.get("RoleArn", ""),
+            network_configuration=_lower_first_keys(
+                properties.get("NetworkConfiguration", {})
+            ),
+            description=properties.get("Description"),
+            authorizer_configuration=_lower_first_keys(
+                properties.get("AuthorizerConfiguration")
+            ),
+            request_header_configuration=_lower_first_keys(
+                properties.get("RequestHeaderConfiguration")
+            ),
+            protocol_configuration=_lower_first_keys(
+                properties.get("ProtocolConfiguration")
+            ),
+            lifecycle_configuration=_lower_first_keys(
+                properties.get("LifecycleConfiguration")
+            ),
+            environment_variables=properties.get("EnvironmentVariables"),
+            tags=properties.get("Tags"),
+        )
+
+    @classmethod
+    def delete_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> None:
+        backend = bedrockagentcorecontrol_backends[account_id][region_name]
+        backend.agent_runtimes.pop(resource_name, None)
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in [
+            "AgentRuntimeArn",
+            "AgentRuntimeId",
+            "AgentRuntimeVersion",
+            "Status",
+            "CreatedAt",
+            "LastUpdatedAt",
+            "WorkloadIdentityDetails.WorkloadIdentityArn",
+        ]
+
+    def get_cfn_attribute(self, attribute_name: str) -> Any:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        attributes = {
+            "AgentRuntimeArn": self.agent_runtime_arn,
+            "AgentRuntimeId": self.agent_runtime_id,
+            "AgentRuntimeVersion": self.agent_runtime_version,
+            "Status": self.status,
+            "CreatedAt": str(self.created_at),
+            "LastUpdatedAt": str(self.last_updated_at),
+            "WorkloadIdentityDetails.WorkloadIdentityArn": self.workload_identity_details[
+                "workloadIdentityArn"
+            ],
+        }
+        if attribute_name in attributes:
+            return attributes[attribute_name]
+        raise UnformattedGetAttTemplateException()
+
     def to_summary(self) -> dict[str, Any]:
         return {
             "agentRuntimeArn": self.agent_runtime_arn,
@@ -123,7 +214,7 @@ class AgentRuntime(BaseModel, ManagedState):
         }
 
 
-class AgentRuntimeEndpoint(BaseModel, ManagedState):
+class AgentRuntimeEndpoint(CloudFormationModel, ManagedState):
     def __init__(
         self,
         region_name: str,
@@ -180,6 +271,64 @@ class AgentRuntimeEndpoint(BaseModel, ManagedState):
             "createdAt": self.created_at,
             "lastUpdatedAt": self.last_updated_at,
         }
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.agent_runtime_endpoint_arn
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-runtimeendpoint.html
+        return "AWS::BedrockAgentCore::RuntimeEndpoint"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "AgentRuntimeEndpoint":
+        properties = cloudformation_json.get("Properties", {})
+        backend = bedrockagentcorecontrol_backends[account_id][region_name]
+        return backend.create_agent_runtime_endpoint(
+            agent_runtime_id=properties["AgentRuntimeId"],
+            name=properties.get("Name") or resource_name,
+            agent_runtime_version=properties.get("AgentRuntimeVersion"),
+            description=properties.get("Description"),
+            tags=properties.get("Tags"),
+        )
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in [
+            "AgentRuntimeEndpointArn",
+            "AgentRuntimeArn",
+            "Id",
+            "Status",
+            "LiveVersion",
+            "TargetVersion",
+        ]
+
+    def get_cfn_attribute(self, attribute_name: str) -> Any:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        attributes = {
+            "AgentRuntimeEndpointArn": self.agent_runtime_endpoint_arn,
+            "AgentRuntimeArn": self.agent_runtime_arn,
+            "Id": self.endpoint_id,
+            "Status": self.status,
+            "LiveVersion": self.live_version,
+            "TargetVersion": self.target_version,
+        }
+        if attribute_name in attributes:
+            return attributes[attribute_name]
+        raise UnformattedGetAttTemplateException()
 
 
 class Gateway(BaseModel, ManagedState):
@@ -513,6 +662,77 @@ class Memory(BaseModel, ManagedState):
         }
 
 
+def _lower_first_keys(value: Any) -> Any:
+    """CloudFormation spells AgentCore properties in PascalCase; the API, in camelCase."""
+    if isinstance(value, dict):
+        return {k[:1].lower() + k[1:]: _lower_first_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_lower_first_keys(v) for v in value]
+    return value
+
+
+class CodeInterpreterCustom(CloudFormationModel):
+    """Only what CloudFormation needs: there is no Code Interpreter API in this backend."""
+
+    def __init__(self, region_name: str, account_id: str, name: str):
+        self.name = name
+        self.code_interpreter_id = f"{name}-{mock_random.get_random_hex(10)}"
+        self.code_interpreter_arn = f"arn:{get_partition(region_name)}:bedrock-agentcore:{region_name}:{account_id}:code-interpreter-custom/{self.code_interpreter_id}"
+        self.created_at = utcnow()
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.code_interpreter_id
+
+    @staticmethod
+    def cloudformation_name_type() -> str:
+        return "Name"
+
+    @staticmethod
+    def cloudformation_type() -> str:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-codeinterpretercustom.html
+        return "AWS::BedrockAgentCore::CodeInterpreterCustom"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "CodeInterpreterCustom":
+        properties = cloudformation_json.get("Properties", {})
+        interpreter = cls(
+            region_name, account_id, properties.get("Name") or resource_name
+        )
+        backend = bedrockagentcorecontrol_backends[account_id][region_name]
+        backend.code_interpreters[interpreter.code_interpreter_id] = interpreter
+        return interpreter
+
+    @classmethod
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in [
+            "CodeInterpreterId",
+            "CodeInterpreterArn",
+            "Status",
+            "CreatedAt",
+        ]
+
+    def get_cfn_attribute(self, attribute_name: str) -> Any:
+        from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
+
+        attributes = {
+            "CodeInterpreterId": self.code_interpreter_id,
+            "CodeInterpreterArn": self.code_interpreter_arn,
+            "Status": "READY",
+            "CreatedAt": str(self.created_at),
+        }
+        if attribute_name in attributes:
+            return attributes[attribute_name]
+        raise UnformattedGetAttTemplateException()
+
+
 class BedrockAgentCoreControlBackend(BaseBackend):
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
@@ -524,6 +744,7 @@ class BedrockAgentCoreControlBackend(BaseBackend):
         self.gateways: dict[str, Gateway] = OrderedDict()
         self.gateway_targets: dict[tuple[str, str], GatewayTarget] = OrderedDict()
         self.memories: dict[str, Memory] = OrderedDict()
+        self.code_interpreters: dict[str, CodeInterpreterCustom] = OrderedDict()
         self.tagger = TaggingService()
 
     def _get_runtime(self, agent_runtime_id: str) -> AgentRuntime:

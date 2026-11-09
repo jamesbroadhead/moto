@@ -1,5 +1,7 @@
 """Handles incoming bedrockagentcore requests, invokes methods, returns responses."""
 
+from urllib.parse import unquote
+
 from moto.core.responses import ActionResult, BaseResponse
 
 from .models import BedrockAgentCoreBackend, bedrockagentcore_backends
@@ -64,3 +66,25 @@ class BedrockAgentCoreResponse(BaseResponse):
             event_id=params["eventId"],
         )
         return ActionResult({"eventId": event_id})
+
+    def invoke_agent_runtime(self) -> tuple[int, dict[str, str], bytes]:
+        session_header = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
+        arn = unquote(
+            self.parsed_url.path.split("/runtimes/", 1)[1].rsplit("/invocations", 1)[0]
+        )
+        session_id = self.headers.get(session_header) or ""
+        forwarded = {
+            k: v
+            for k, v in self.headers.items()
+            if k.lower() in ("content-type", "accept")
+            or k.lower().startswith("x-amzn-bedrock-agentcore-")
+        }
+        status, headers, body = self.backend.invoke_agent_runtime(
+            agent_runtime_arn=arn,
+            qualifier=self.querystring.get("qualifier", [None])[0],
+            session_id=session_id,
+            payload=self.body if isinstance(self.body, bytes) else self.body.encode(),
+            headers=forwarded,
+        )
+        headers[session_header] = session_id
+        return status, headers, body

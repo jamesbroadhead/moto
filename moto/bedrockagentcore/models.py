@@ -1,7 +1,9 @@
 """BedrockAgentCore models."""
 
 from typing import Any
+from urllib.parse import quote
 
+from moto import settings
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel
 from moto.core.utils import unix_time, utcnow
@@ -120,6 +122,50 @@ class BedrockAgentCoreBackend(BaseBackend):
             raise ResourceNotFoundException(f"Event {event_id} not found")
         del self.events[key][event_id]
         return event_id
+
+    def invoke_agent_runtime(
+        self,
+        agent_runtime_arn: str,
+        qualifier: str | None,
+        session_id: str,
+        payload: bytes,
+        headers: dict[str, str],
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Forwards the invocation to MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT, which runs the runtime's code.
+
+        Returns the runtime's status, content type and body. Without the setting, this is not implemented.
+        """
+        from moto.bedrockagentcorecontrol.models import bedrockagentcorecontrol_backends
+
+        control = bedrockagentcorecontrol_backends[self.account_id][self.region_name]
+        if not any(
+            runtime.agent_runtime_arn == agent_runtime_arn
+            for runtime in control.agent_runtimes.values()
+        ):
+            raise ResourceNotFoundException(f"Runtime {agent_runtime_arn} not found")
+        endpoint = settings.bedrock_agentcore_invoke_endpoint()
+        if endpoint is None:
+            raise NotImplementedError(
+                "InvokeAgentRuntime needs MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT to run the runtime"
+            )
+        import requests
+
+        response = requests.post(
+            f"{endpoint.rstrip('/')}/runtimes/{quote(agent_runtime_arn, safe='')}/invocations",
+            params={"qualifier": qualifier} if qualifier else None,
+            data=payload,
+            headers=headers,
+            timeout=900,
+        )
+        return (
+            response.status_code,
+            {
+                "Content-Type": response.headers.get(
+                    "Content-Type", "application/octet-stream"
+                )
+            },
+            response.content,
+        )
 
 
 bedrockagentcore_backends = BackendDict(
