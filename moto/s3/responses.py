@@ -3,7 +3,7 @@ import re
 import urllib.parse
 from collections.abc import Iterator
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 
@@ -3311,11 +3311,14 @@ class S3Response(BaseResponse):
             "content-md5": "Content-MD5",
             "content-type": "Content-Type",
         }
+        # Match whole parameter names: response-content-type and the like override the response, not the request.
+        query = {
+            k.lower(): v
+            for k, v in parse_qsl(urlparse(url).query, keep_blank_values=True)
+        }
         for url_key, header_key in metadata_to_check.items():
-            metadata_in_url = re.search(url_key + "=(.+?)(&.+$|$)", url)
-            if metadata_in_url:
-                url_value = unquote(metadata_in_url.group(1))
-                if header_key not in headers or (url_value != headers[header_key]):
+            if url_key in query:
+                if header_key not in headers or (query[url_key] != headers[header_key]):
                     return True
         return False
 

@@ -50,6 +50,27 @@ def test_presigned_url_generates_content_response_headers(bucket_name=None):
     assert response.headers.get("Expires") == "Wed, 21 Oct 2015 07:28:00 GMT"
 
 
+@s3_aws_verified
+@pytest.mark.aws_verified
+def test_presigned_url_with_response_overrides_for_a_missing_key(bucket_name=None):
+    client = boto3.client("s3", DEFAULT_REGION_NAME)
+    params = {
+        "Bucket": bucket_name,
+        "Key": "missing.json",
+        "ResponseContentType": "application/json",
+        "ResponseContentEncoding": "gzip",
+    }
+    presigned_url = client.generate_presigned_url("get_object", params, ExpiresIn=900)
+    get_kwargs = {}
+    if not allow_aws_request() and settings.is_test_proxy_mode():
+        add_proxy_details(get_kwargs)
+    response = requests.get(presigned_url, **get_kwargs)
+
+    # The response overrides are not request headers the client must send
+    assert response.status_code == 404
+    assert "NoSuchKey" in response.text
+
+
 def test_presigned_url_replaces_stored_content_disposition_in_server_mode():
     if not settings.TEST_DECORATOR_MODE:
         raise SkipTest("No point testing the ThreadedMotoServer in Server/Proxy-mode")
