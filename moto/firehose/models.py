@@ -779,10 +779,18 @@ class FirehoseBackend(BaseBackend, TaggableResourcesMixin):
             groups.setdefault(target, []).append(row)
         engine = SqlEngine(self.account_id, self.region_name)
         for (database, name), rows in groups.items():
-            with _LOCK:
-                table = engine.catalog.load_table((database, name))
-                schema = table.schema().as_arrow()
-                table.append(_arrow_rows(rows, schema))
+            try:
+                with _LOCK:
+                    table = engine.catalog.load_table((database, name))
+                    schema = table.schema().as_arrow()
+                    table.append(_arrow_rows(rows, schema))
+            except (
+                Exception
+            ) as exc:  # AWS writes such records to the error output prefix
+                warnings.warn(
+                    f"Firehose could not deliver to Iceberg table {database}.{name}: {exc!r}",
+                    stacklevel=2,
+                )
         return [{"RecordId": str(mock_random.uuid4())} for _ in range(len(records))]
 
     def put_record_batch(
