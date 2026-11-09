@@ -1,6 +1,7 @@
 import fnmatch
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
@@ -23,6 +24,9 @@ from moto.utilities import iceberg_rest
 from moto.utilities.paginator import paginate
 from moto.utilities.tagging_service import TaggingService
 from moto.utilities.utils import get_partition
+
+# How long after a query ends its EventBridge event arrives
+STATE_CHANGE_EVENT_DELAY_SECONDS = 0.5
 
 
 class TaggableResourceMixin:
@@ -206,6 +210,7 @@ class Execution(ManagedState):
         self.state_change_reason: str | None = None
         self.statement_type: str | None = None
         self.substatement_type: str | None = None
+        self.workgroup_name = workgroup.name if workgroup else "primary"
 
         if self.config is not None and "OutputLocation" in self.config:
             if not self.config["OutputLocation"].endswith("/"):
@@ -413,6 +418,7 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
             workgroup=self.work_groups.get(workgroup),
             execution_parameters=execution_parameters,
         )
+        execution.workgroup_name = workgroup or "primary"
         self.executions[execution.id] = execution
 
         self._process_ddl(query, context)
@@ -462,6 +468,41 @@ class AthenaBackend(BaseBackend, TaggableResourcesMixin):
         if error:
             execution.fail(error)
         execution.end_time = time.time()
+        # EventBridge delivers the event after StartQueryExecution has returned
+        threading.Timer(
+            STATE_CHANGE_EVENT_DELAY_SECONDS,
+            self._send_state_change_event,
+            args=(execution, "FAILED" if error else "SUCCEEDED"),
+        ).start()
+
+    def _send_state_change_event(self, execution: Execution, state: str) -> None:
+        """Sends the 'Athena Query State Change' event for the query's final state to the default event bus."""
+        from moto.events.models import events_backends
+
+        event = {
+            "version": "0",
+            "id": str(mock_random.uuid4()),
+            "detail-type": "Athena Query State Change",
+            "source": "aws.athena",
+            "account": self.account_id,
+            "time": execution.end_time,
+            "region": self.region_name,
+            "resources": [],
+            "detail": {
+                "currentState": state,
+                "previousState": "RUNNING",
+                "queryExecutionId": execution.id,
+                "sequenceNumber": "3",
+                "statementType": execution.statement_type or "DML",
+                "versionId": "0",
+                "workgroupName": execution.workgroup_name,
+            },
+        }
+        bus = events_backends[self.account_id][self.region_name].event_buses.get(
+            "default"
+        )
+        for rule in bus.rules.values() if bus else []:
+            rule.send_to_targets(event, transform_input=True)
 
     def get_table_metadata(
         self, catalog_name: str, database_name: str, table_name: str

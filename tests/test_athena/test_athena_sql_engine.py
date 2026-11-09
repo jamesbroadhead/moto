@@ -769,3 +769,39 @@ def test_alembic_migrations_through_pyathena(athena: Any, tmp_path: Any) -> None
             connection.execute(sa.text("SELECT count(*) FROM alembic_version")).scalar()
             == 1
         )
+
+
+def test_query_state_change_events(athena: Any) -> None:
+    sqs = boto3.client("sqs", region_name=REGION)
+    queue_url = sqs.create_queue(QueueName="athena-events")["QueueUrl"]
+    queue_arn = sqs.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    events = boto3.client("events", region_name=REGION)
+    events.put_rule(
+        Name="athena-done",
+        EventPattern=json.dumps(
+            {
+                "source": ["aws.athena"],
+                "detail-type": ["Athena Query State Change"],
+                "detail": {"currentState": ["SUCCEEDED", "FAILED"]},
+            }
+        ),
+    )
+    events.put_targets(Rule="athena-done", Targets=[{"Id": "q", "Arn": queue_arn}])
+
+    succeeded = run(athena, "SELECT 1")["QueryExecutionId"]
+    failed = run(athena, "SELECT * FROM missing", expect="FAILED")["QueryExecutionId"]
+
+    received: dict[str, Any] = {}
+    while len(received) < 2:
+        messages = sqs.receive_message(
+            QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=5
+        ).get("Messages")
+        assert messages, f"only got events for {list(received)}"
+        for message in messages:
+            event = json.loads(message["Body"])
+            received[event["detail"]["queryExecutionId"]] = event
+    assert received[succeeded]["detail"]["currentState"] == "SUCCEEDED"
+    assert received[succeeded]["detail"]["workgroupName"] == "primary"
+    assert received[failed]["detail"]["currentState"] == "FAILED"
