@@ -613,6 +613,21 @@ class SqlEngine:
         return outcome
 
 
+_SQL_LITERAL = re.compile(
+    r"^\s*(?:[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|'(?:[^']|'')*'|true|false|null"
+    r"|(?:date|time|timestamp|interval|decimal|x)\s*'(?:[^']|'')*'(?:\s+\w+)?"
+    r"|(?:array\s*\[|row\s*\(|cast\s*\(|map\s*\().*)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parameter_literal(parameter: str) -> str:
+    """A parameter as SQL: a literal stays as is; Athena reads any other text as a string."""
+    if _SQL_LITERAL.match(parameter):
+        return parameter
+    return "'" + parameter.replace("'", "''") + "'"
+
+
 def _bind_parameters(statement: str, parameters: list[str]) -> str:
     """Replaces the query's ? placeholders, outside quotes and comments, with ExecutionParameters in order.
 
@@ -650,7 +665,7 @@ def _bind_parameters(statement: str, parameters: list[str]) -> str:
         elif char == "?":
             placeholders += 1
             if remaining:
-                out.append(remaining.pop(0))
+                out.append(_parameter_literal(remaining.pop(0)))
             i += 1
         else:
             out.append(char)

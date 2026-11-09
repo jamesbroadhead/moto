@@ -369,6 +369,14 @@ def test_execution_parameters(athena: Any) -> None:
         "b?",
     ]
 
+    # A parameter that is not a SQL literal is read as a string
+    execution_id = query(
+        "SELECT id FROM orders WHERE created_at < CAST(? AS TIMESTAMP) AND id = ?",
+        ["2024-01-01 12:00:00.000000", "'a'"],
+    )
+    result = athena.get_query_results(QueryExecutionId=execution_id)
+    assert result["ResultSet"]["Rows"][1]["Data"][0]["VarCharValue"] == "a"
+
     query("SELECT id FROM orders WHERE id = ?", ["'a'", "'b'"], expect="FAILED")
 
 
