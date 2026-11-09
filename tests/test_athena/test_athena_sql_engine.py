@@ -437,6 +437,22 @@ def test_json_extract_cast_to_varchar_is_the_value(athena: Any) -> None:
     ) == [["Ada", "2"]]
 
 
+def test_map_agg(athena: Any) -> None:
+    run(athena, ORDERS)
+    run(
+        athena,
+        """
+        INSERT INTO orders VALUES
+            ('a', 1.5, 2, TIMESTAMP '2024-01-01 10:00:00', NULL, NULL, NULL),
+            ('b', 3.0, 1, TIMESTAMP '2024-01-02 11:30:00', NULL, NULL, NULL)
+        """,
+    )
+    assert rows(
+        athena,
+        "SELECT element_at(m, 'b') FROM (SELECT map_agg(id, quantity) AS m FROM orders)",
+    ) == [["1"]]
+
+
 def test_federated_postgres_catalog(
     athena: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

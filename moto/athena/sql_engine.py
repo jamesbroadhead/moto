@@ -1224,6 +1224,17 @@ class _Query:
             for name in fields:
                 node = exp.Bracket(this=node, expressions=[exp.Literal.string(name)])
             column.replace(node)
+        # Trino's map_agg(key, value) aggregate; DuckDB builds the map from two lists
+        for call in list(tree.find_all(exp.Anonymous)):
+            if call.name.lower() == "map_agg" and len(call.expressions) == 2:
+                key, value = (e.sql(dialect="duckdb") for e in call.expressions)
+                call.replace(
+                    sqlglot.parse_one(
+                        f"MAP(LIST({key}) FILTER (WHERE {key} IS NOT NULL), "
+                        f"LIST({value}) FILTER (WHERE {key} IS NOT NULL))",
+                        read="duckdb",
+                    )
+                )
         # Trino casts a JSON string to VARCHAR as its value; DuckDB keeps the quotes
         for cast in list(tree.find_all(exp.Cast)):
             if isinstance(cast.this, exp.JSONExtract) and cast.to.is_type(
