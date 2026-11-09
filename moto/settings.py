@@ -164,6 +164,86 @@ def glue_job_run_endpoint() -> str | None:
     return os.environ.get("MOTO_GLUE_JOB_RUN_ENDPOINT") or None
 
 
+def lambda_executor() -> str:
+    """MOTO_LAMBDA_EXECUTOR: "docker" (default) runs each invocation in a container;
+    "process" runs functions in warm local processes that speak the Lambda Runtime API."""
+    return os.environ.get("MOTO_LAMBDA_EXECUTOR", "docker").lower()
+
+
+def lambda_runtime_commands() -> dict[str, list[str]]:
+    """MOTO_LAMBDA_RUNTIME_COMMANDS: JSON mapping runtime patterns (fnmatch) to the bootstrap command
+    that starts the runtime, as a list or a shell-style string, e.g. {"java21": "/opt/java21/bootstrap"}."""
+    import shlex
+
+    commands = json.loads(os.environ.get("MOTO_LAMBDA_RUNTIME_COMMANDS") or "{}")
+    return {
+        pattern: shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
+        for pattern, cmd in commands.items()
+    }
+
+
+def lambda_process_pool_size() -> int:
+    """MOTO_LAMBDA_PROCESS_POOL_SIZE: the most warm workers per function version (default 4).
+    A function's reserved concurrency lowers it."""
+    return int(os.environ.get("MOTO_LAMBDA_PROCESS_POOL_SIZE", "4"))
+
+
+def lambda_event_source_free_workers() -> int:
+    """MOTO_LAMBDA_EVENT_SOURCE_FREE_WORKERS: workers per function that event source mapping
+    invocations leave for other invocations (default 1), so polling cannot starve direct calls."""
+    return int(os.environ.get("MOTO_LAMBDA_EVENT_SOURCE_FREE_WORKERS", "1"))
+
+
+def lambda_local_code_bucket() -> str | None:
+    """MOTO_LAMBDA_LOCAL_CODE_BUCKET: code and layers whose S3Bucket has this name are read from
+    the local directory (or zip file) named by S3Key, without uploading them.
+    Glue job scripts in this bucket are read the same way."""
+    return os.environ.get("MOTO_LAMBDA_LOCAL_CODE_BUCKET") or None
+
+
+def lambda_layer_paths() -> dict[str, str]:
+    """MOTO_LAMBDA_LAYER_PATHS: JSON mapping layer version ARN patterns (fnmatch) to local directories
+    with their content, for layers moto does not hold, e.g. public AWS layers."""
+    return json.loads(os.environ.get("MOTO_LAMBDA_LAYER_PATHS") or "{}")
+
+
+def lambda_opt_dir() -> str | None:
+    """MOTO_LAMBDA_OPT_DIR: a directory, typically /opt, into which the process executor links the
+    contents of each function's layers (first layer to provide a path wins), for code that reads /opt."""
+    return os.environ.get("MOTO_LAMBDA_OPT_DIR") or None
+
+
+def lambda_work_dir() -> str:
+    """MOTO_LAMBDA_WORK_DIR: where the process executor unpacks code and gives each worker its TMPDIR."""
+    import tempfile
+
+    return os.environ.get("MOTO_LAMBDA_WORK_DIR") or os.path.join(
+        tempfile.gettempdir(), "moto-lambda"
+    )
+
+
+def glue_job_executor() -> str | None:
+    """MOTO_GLUE_JOB_EXECUTOR: "process" runs job runs as local processes, see glue_job_commands."""
+    return (os.environ.get("MOTO_GLUE_JOB_EXECUTOR") or "").lower() or None
+
+
+def glue_job_commands() -> dict[str, list[str]]:
+    """MOTO_GLUE_JOB_COMMANDS: JSON mapping a job's Command.Name to the command that runs its script,
+    as a list or a shell-style string. Default: pythonshell jobs run with the current interpreter.
+    Jobs with other command names keep moto's default behaviour."""
+    import shlex
+    import sys
+
+    commands = json.loads(
+        os.environ.get("MOTO_GLUE_JOB_COMMANDS")
+        or json.dumps({"pythonshell": [sys.executable]})
+    )
+    return {
+        name: shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
+        for name, cmd in commands.items()
+    }
+
+
 def lambda_stub_ecr() -> bool:
     # Whether to stub or mock ecr backend when deploying image based lambdas.
     # True => don't requiring image presence in moto ecr backend for `create_function`.

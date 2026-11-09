@@ -1,7 +1,7 @@
 import hashlib
 import re
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from threading import Lock
 from typing import Any
@@ -11,6 +11,7 @@ from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.utils import utcnow
+from moto.glue import job_runner
 from moto.moto_api._internal import mock_random
 from moto.moto_api._internal.managed_state_model import ManagedState
 from moto.utilities.utils import get_partition
@@ -717,6 +718,15 @@ class GlueBackend(BaseBackend, TaggableResourcesMixin):
         notification_property: dict[str, int] | None,
         previous_run_id: str | None,
     ) -> str:
+        """
+        Job runs complete after a configurable number of state transitions by default.
+
+        With MOTO_GLUE_JOB_EXECUTOR=process, runs of jobs whose Command.Name has a command in MOTO_GLUE_JOB_COMMANDS
+        (default: pythonshell runs with the current Python interpreter) execute the job's script in a local process,
+        with the arguments `--JOB_NAME <name> --JOB_RUN_ID <id>` and the run's arguments.
+        The run ends SUCCEEDED when the script exits with 0, FAILED otherwise (the last line of stderr becomes the ErrorMessage), or TIMEOUT after the job's Timeout.
+        Scripts are read from S3 in Moto, from a local path, or from the local directory named by the key when the bucket is MOTO_LAMBDA_LOCAL_CODE_BUCKET.
+        """
         job = self.get_job(name)
         return job.start_job_run(
             arguments=arguments,
@@ -1851,7 +1861,6 @@ class FakeDatabase(CloudFormationModel):
         self.created_time = utcnow()
         self.tables: dict[str, FakeTable] = OrderedDict()
 
-
     @staticmethod
     def cloudformation_type() -> str:
         return "AWS::Glue::Database"
@@ -1865,9 +1874,13 @@ class FakeDatabase(CloudFormationModel):
         region_name: str,
         **kwargs: Any,
     ) -> "FakeDatabase":
-        database_input = dict(cloudformation_json["Properties"].get("DatabaseInput", {}))
+        database_input = dict(
+            cloudformation_json["Properties"].get("DatabaseInput", {})
+        )
         name = database_input.setdefault("Name", resource_name)
-        return glue_backends[account_id][region_name].create_database(name, database_input)
+        return glue_backends[account_id][region_name].create_database(
+            name, database_input
+        )
 
     @property
     def physical_resource_id(self) -> str:
@@ -1911,7 +1924,6 @@ class FakeTable(CloudFormationModel):
         self.versions: dict[str, dict[str, Any]] = {
             str(self._current_version): table_input
         }
-
 
     @staticmethod
     def cloudformation_type() -> str:
@@ -2267,7 +2279,6 @@ class FakeJob(CloudFormationModel):
 
         self.job_runs: list[FakeJobRun] = []
 
-
     @staticmethod
     def cloudformation_type() -> str:
         return "AWS::Glue::Job"
@@ -2386,8 +2397,11 @@ class FakeJob(CloudFormationModel):
             job_run_id=previous_run_id,
         )
         self.job_runs.append(fake_job_run)
+        job_command: dict[str, Any] = self.command  # type: ignore[assignment]
         if settings.glue_job_run_endpoint():
-            fake_job_run.run_externally(self.command)
+            fake_job_run.run_externally(job_command)
+        elif command := job_runner.command_for(job_command):
+            fake_job_run.run_process(command, job_command, self.backend)
         return fake_job_run.job_run_id
 
     def get_job_run(self, run_id: str) -> "FakeJobRun":
@@ -2450,37 +2464,72 @@ class FakeJobRun(ManagedState):
     def status(self, value: str) -> None:
         ManagedState.status.fset(self, value)  # type: ignore[attr-defined]
 
-    def run_externally(self, command: dict[str, Any] | None) -> None:
-        """Hands the run to MOTO_GLUE_JOB_RUN_ENDPOINT; the run is RUNNING until it answers."""
+    def _run_in_background(self, run: Callable[[], tuple[str, str | None]]) -> None:
+        """The run is RUNNING until `run` returns its final state and error message."""
         import threading
-
-        import requests
 
         self.external_state = "RUNNING"
         self.error_message: str | None = None
-        body = {
+
+        def target() -> None:
+            try:
+                self.external_state, self.error_message = run()
+            except (
+                Exception
+            ) as e:  # the runner is gone: the run fails, as a crashed job would
+                self.external_state, self.error_message = "FAILED", str(e)
+            self.completed_on = utcnow()
+            self.execution_time = int(
+                (self.completed_on - self.started_on).total_seconds()
+            )
+
+        threading.Thread(target=target, daemon=True).start()
+
+    def run_externally(self, command: dict[str, Any] | None) -> None:
+        """Hands the run to MOTO_GLUE_JOB_RUN_ENDPOINT."""
+        import requests
+
+        endpoint: str = settings.glue_job_run_endpoint()  # type: ignore[assignment]
+        body: dict[str, Any] = {
             "JobName": self.job_name,
             "JobRunId": self.job_run_id,
             "Arguments": self.arguments or {},
             "Command": command or {},
         }
 
-        def run() -> None:
-            try:
-                resp = requests.post(settings.glue_job_run_endpoint(), json=body, timeout=3600)  # type: ignore[arg-type]
-                result = resp.json() if resp.content else {}
-                ok = resp.status_code < 300 and result.get("JobRunState", "SUCCEEDED") == "SUCCEEDED"
-                self.error_message = None if ok else result.get("ErrorMessage") or resp.text[:2000]
-                self.external_state = "SUCCEEDED" if ok else "FAILED"
-            except Exception as e:  # the runner is gone: the run fails, as a crashed job would
-                self.error_message = str(e)
-                self.external_state = "FAILED"
-            self.completed_on = utcnow()
+        def run() -> tuple[str, str | None]:
+            resp = requests.post(endpoint, json=body, timeout=3600)
+            result = resp.json() if resp.content else {}
+            ok = (
+                resp.status_code < 300
+                and result.get("JobRunState", "SUCCEEDED") == "SUCCEEDED"
+            )
+            if ok:
+                return "SUCCEEDED", None
+            return "FAILED", result.get("ErrorMessage") or resp.text[:2000]
 
-        threading.Thread(target=run, daemon=True).start()
+        self._run_in_background(run)
+
+    def run_process(
+        self, command: list[str], job_command: dict[str, Any], backend: GlueBackend
+    ) -> None:
+        """Runs the job's script locally, see moto.glue.job_runner."""
+        self._run_in_background(
+            lambda: job_runner.run(
+                command,
+                job_command,
+                self.job_name,
+                self.job_run_id,
+                self.arguments or {},
+                self.timeout,
+                backend.account_id,
+                backend.region_name,
+                backend.partition,
+            )
+        )
 
     def as_dict(self) -> dict[str, Any]:
-        return_dict = {
+        return_dict: dict[str, Any] = {
             "Id": self.job_run_id,
             "Attempt": 0,
             "JobName": self.job_name,
@@ -2489,7 +2538,7 @@ class FakeJobRun(ManagedState):
             "CompletedOn": self.completed_on,
             "JobRunState": self.status,
             "PredecessorRuns": [],
-            "ExecutionTime": 123,
+            "ExecutionTime": getattr(self, "execution_time", 123),
             "WorkerType": self.worker_type,
             "LogGroupName": "test/log",
             "GlueVersion": "0.9",

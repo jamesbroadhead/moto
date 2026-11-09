@@ -8,7 +8,11 @@ from moto.core.responses import TYPE_RESPONSE, ActionResult, BaseResponse
 from moto.utilities.aws_headers import amz_crc32
 from moto.utilities.utils import ARN_PARTITION_REGEX
 
-from .exceptions import FunctionAlreadyExists, UnknownFunctionException
+from .exceptions import (
+    FunctionAlreadyExists,
+    UnknownFunctionException,
+    UnknownLayerVersionException,
+)
 from .models import LambdaBackend
 from .utils import get_backend
 
@@ -53,7 +57,7 @@ class LambdaResponse(BaseResponse):
 
         # URL Decode in case it's a ARN:
         function_name = unquote(self.path.rsplit("/", 2)[-2])
-        qualifier = self._get_param("qualifier")
+        qualifier = self._get_param("Qualifier") or self._get_param("qualifier")
 
         payload = self.backend.invoke(
             function_name, qualifier, self.body, self.headers, response_headers
