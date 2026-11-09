@@ -285,6 +285,8 @@ class DomainDispatcherApplication:
             "/latest/api/"
         ):
             host = "instance_metadata"
+        elif self.is_http_api_request(environ):
+            host = "execute-api.us-east-1.amazonaws.com"
         else:
             host = None
 
@@ -303,6 +305,14 @@ class DomainDispatcherApplication:
                 app = self.create_app(backend)
                 self.app_instances[backend] = app
             return app
+
+    @staticmethod
+    def is_http_api_request(environ: dict[str, Any]) -> bool:
+        # Requests to an HTTP API carry no credential scope to dispatch on, only the Host:
+        # {api-id}.execute-api.{region}.amazonaws.com, or a custom domain name.
+        from moto.apigatewayv2.execution import is_http_api_host
+
+        return is_http_api_host(environ.get("HTTP_HOST"))
 
     def _get_body(self, environ: dict[str, Any]) -> str | None:
         body = None

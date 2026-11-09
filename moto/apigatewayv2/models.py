@@ -133,6 +133,8 @@ class Authorizer(CloudFormationModel):
         self.identity_validation_expr = identity_validation_expr
         self.jwt_config = jwt_config
         self.name = name
+        # Lambda authorizer results by identity, for AuthorizerResultTtlInSeconds
+        self.cached_results: dict[str, Any] = {}
 
     def update(
         self,
@@ -167,6 +169,7 @@ class Authorizer(CloudFormationModel):
             self.jwt_config = jwt_config
         if name is not None:
             self.name = name
+        self.cached_results.clear()
 
     @staticmethod
     def cloudformation_type() -> str:
@@ -1329,6 +1332,7 @@ class DomainName(CloudFormationModel):
         self.mutual_tls_authentication = mutual_tls_authentication
         self.tags = tags
         self.domain_name_arn = f"arn:{get_partition(backend.region_name)}:apigateway:{backend.region_name}::/domainnames/{domain_name}"
+        self.regional_domain_name = f"d-{hashlib.md5(domain_name.encode()).hexdigest()[:10]}.execute-api.{backend.region_name}.amazonaws.com"
 
     @staticmethod
     def cloudformation_type() -> str:
@@ -1370,7 +1374,7 @@ class DomainName(CloudFormationModel):
         from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
 
         if attribute_name == "RegionalDomainName":
-            return f"d-{hashlib.md5(self.domain_name.encode()).hexdigest()[:10]}.execute-api.amazonaws.com"
+            return self.regional_domain_name
         if attribute_name == "RegionalHostedZoneId":
             return "Z2FDTNDATAQYW2"
         if attribute_name == "DomainNameArn":
@@ -1382,7 +1386,10 @@ class DomainName(CloudFormationModel):
             "apiMappingSelectionExpression": self.api_mapping_selection_expression,
             "domainName": self.domain_name,
             "domainNameArn": self.domain_name_arn,
-            "domainNameConfigurations": self.domain_name_configurations,
+            "domainNameConfigurations": [
+                {"apiGatewayDomainName": self.regional_domain_name, **config}
+                for config in self.domain_name_configurations or []
+            ],
             "mutualTlsAuthentication": self.mutual_tls_authentication,
             "tags": self.tags,
         }
@@ -1439,7 +1446,14 @@ class ApiMapping(CloudFormationModel):
 
 
 class ApiGatewayV2Backend(BaseBackend):
-    """Implementation of ApiGatewayV2 APIs."""
+    """Implementation of ApiGatewayV2 APIs.
+
+    HTTP APIs also serve requests. Send them to `https://{api-id}.execute-api.{region}.amazonaws.com`,
+    to a custom domain name's `ApiGatewayDomainName`, or, against MotoServer, with the custom domain
+    name as the Host header. Routes, stages, API mappings, CORS configurations, Lambda (REQUEST) and
+    JWT authorizers apply, and AWS_PROXY (Lambda) and HTTP_PROXY integrations are invoked.
+    Lambda functions run the way `Invoke` runs them. JWT signatures are not verified.
+    """
 
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
