@@ -6,6 +6,7 @@ from typing import Any
 from unittest import SkipTest, mock
 
 import boto3
+import jsonschema
 import pytest
 import requests
 from werkzeug.test import Client
@@ -433,7 +434,7 @@ def test_simple_lambda_authorizer(lambdas, client):
     assert denied.json() == {"message": "Forbidden"}
     assert allowed.status_code == 200
     auth_event = lambdas.event("authorizer")
-    assert auth_event["type"] == "REQUEST"
+    jsonschema.validate(auth_event, AUTHORIZER_EVENT_2_0)
     assert auth_event["identitySource"] == ["good"]
     assert auth_event["routeArn"] == (
         f"arn:aws:execute-api:{REGION}:{DEFAULT_ACCOUNT_ID}:{api_id}/$default/GET/items/1"
@@ -745,3 +746,146 @@ def test_execute_api_host_in_server_mode(lambdas, client):
     assert lambdas.event()["pathParameters"] == {"id": "3"}
     assert missing.status_code == 404
     assert json.loads(missing.data) == {"message": "Not Found"}
+
+
+AUTHORIZER_STACK = f"""
+Resources:
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: api
+      ProtocolType: HTTP
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: {invocation_uri(FUNCTION)}
+      PayloadFormatVersion: 2.0
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      Name: auth
+      ApiId: !Ref Api
+      AuthorizerType: REQUEST
+      AuthorizerUri: {invocation_uri(AUTHORIZER)}
+      IdentitySource:
+        - $context.identity.sourceIp
+        - $context.path
+      AuthorizerPayloadFormatVersion: 2.0
+      EnableSimpleResponses: true
+      AuthorizerResultTtlInSeconds: 300
+  Route:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /items/{{id}}
+      Target: !Sub integrations/${{Integration}}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref Authorizer
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref Api
+      StageName: $default
+Outputs:
+  ApiId:
+    Value: !Ref Api
+"""
+
+STRING_MAP = {"type": "object", "additionalProperties": {"type": "string"}}
+# Payload format 2.0 REQUEST authorizer input, as documented in
+# https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-lambda-authorizer.html
+AUTHORIZER_EVENT_2_0 = {
+    "type": "object",
+    "required": [
+        "version",
+        "type",
+        "routeArn",
+        "identitySource",
+        "routeKey",
+        "rawPath",
+        "rawQueryString",
+        "headers",
+        "requestContext",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        "version": {"const": "2.0"},
+        "type": {"const": "REQUEST"},
+        "routeArn": {"type": "string"},
+        "identitySource": {"type": "array", "items": {"type": "string"}},
+        "routeKey": {"type": "string"},
+        "rawPath": {"type": "string"},
+        "rawQueryString": {"type": "string"},
+        "cookies": {"type": "array", "items": {"type": "string"}},
+        "headers": STRING_MAP,
+        "queryStringParameters": STRING_MAP,
+        "pathParameters": STRING_MAP,
+        "stageVariables": STRING_MAP,
+        "requestContext": {
+            "type": "object",
+            "required": [
+                "accountId",
+                "apiId",
+                "domainName",
+                "domainPrefix",
+                "http",
+                "requestId",
+                "routeKey",
+                "stage",
+                "time",
+                "timeEpoch",
+            ],
+            "properties": {
+                "http": {
+                    "type": "object",
+                    "required": ["method", "path", "protocol", "sourceIp", "userAgent"],
+                    "properties": {
+                        k: {"type": "string"}
+                        for k in ["method", "path", "protocol", "sourceIp", "userAgent"]
+                    },
+                },
+                "timeEpoch": {"type": "integer"},
+                **{
+                    k: {"type": "string"}
+                    for k in [
+                        "accountId",
+                        "apiId",
+                        "domainName",
+                        "domainPrefix",
+                        "requestId",
+                        "routeKey",
+                        "stage",
+                        "time",
+                    ]
+                },
+            },
+        },
+    },
+}
+
+
+def test_authorizer_event_from_cloudformation_template(lambdas):
+    """A template's unquoted `AuthorizerPayloadFormatVersion: 2.0` still means payload 2.0."""
+    cfn = boto3.client("cloudformation", region_name=REGION)
+    cfn.create_stack(StackName="s", TemplateBody=AUTHORIZER_STACK)
+    outputs = cfn.describe_stacks(StackName="s")["Stacks"][0]["Outputs"]
+    api_id = outputs[0]["OutputValue"]
+    lambdas.handlers["authorizer"] = lambda e: {
+        "isAuthorized": True,
+        "context": {"workspaceId": "w"},
+    }
+
+    resp = requests.get(url(api_id, "/items/1?iceberg=x"))
+
+    assert resp.status_code == 200
+    event = lambdas.event("authorizer")
+    jsonschema.validate(event, AUTHORIZER_EVENT_2_0)
+    assert event["identitySource"] == ["127.0.0.1", "/items/1"]
+    assert event["requestContext"]["http"]["path"] == "/items/1"
+    assert event["queryStringParameters"] == {"iceberg": "x"}
+    assert lambdas.event()["version"] == "2.0"
+    assert lambdas.event()["requestContext"]["authorizer"] == {
+        "lambda": {"workspaceId": "w"}
+    }

@@ -107,6 +107,14 @@ def _truthy(value: Any) -> bool:
     return value is True or str(value).lower() == "true"
 
 
+def payload_format_version(value: Any) -> str:
+    """ "1.0" or "2.0"; a template's unquoted `2.0` arrives as a number."""
+    try:
+        return "1.0" if float(value) == 1 else "2.0"
+    except (TypeError, ValueError):
+        return "2.0"
+
+
 def _first_lower(value: Any) -> Any:
     if isinstance(value, dict):
         return {k[:1].lower() + k[1:]: v for k, v in value.items()}
@@ -248,6 +256,7 @@ class HttpApiInvocation:
         self.path = "/"
         self.raw_path = "/"
         self._match: RouteMatch | None = None
+        self.base_path_matched = ""
 
     def handle(self) -> TYPE_RESPONSE:
         try:
@@ -318,6 +327,7 @@ class HttpApiInvocation:
                 if api is None or mapping.stage not in api.stages:
                     raise NOT_FOUND
                 self.backend, self.api, self.stage_name = backend, api, mapping.stage
+                self.base_path_matched = key
                 # API Gateway strips the mapping key from 2.0's rawPath and keeps it in 1.0's path
                 self.raw_path = self._strip_prefix(self.raw_request_path, key)
                 self.path = unquote(self.raw_path)
@@ -557,7 +567,7 @@ class HttpApiInvocation:
     ) -> tuple[int, Headers, bytes]:
         if integration.integration_subtype:
             raise INTERNAL_SERVER_ERROR
-        version = integration.payload_format_version or "2.0"
+        version = payload_format_version(integration.payload_format_version)
         headers = self._request_headers()
         query = list(self.query)
         for key, source in (integration.request_parameters or {}).items():
@@ -744,6 +754,7 @@ class HttpApiInvocation:
             # this header with datetime.utcfromtimestamp
             "requestTimeEpoch": str(int(self.now.timestamp())),
             "routeKey": match.route.route_key if match else "",
+            "customDomain.basePathMatched": self.base_path_matched,
             "stage": self.stage_name,
         }
         return variables.get(name, "")
@@ -855,26 +866,8 @@ class HttpApiInvocation:
                 raise FORBIDDEN
             return cached.result
 
-        version = authorizer.auth_payload_format_version or "2.0"
-        route_arn = self._route_arn()
-        headers = self._request_headers()
-        event = self.event(version, match, headers, list(self.query), None, False)
-        event.pop("body", None)
-        if version == "2.0":
-            event = {
-                **event,
-                "type": "REQUEST",
-                "routeArn": route_arn,
-                "identitySource": identity,
-            }
-        else:
-            event = {
-                **event,
-                "type": "REQUEST",
-                "methodArn": route_arn,
-                "identitySource": ",".join(identity),
-                "authorizationToken": identity[0] if identity else None,
-            }
+        version = payload_format_version(authorizer.auth_payload_format_version)
+        event = self.authorizer_event(version, match, identity)
         payload, errored = self.invoke_lambda(authorizer.authorizer_uri or "", event)
         try:
             output = json.loads(payload) if payload is not None else None
@@ -909,6 +902,36 @@ class HttpApiInvocation:
         if not allowed:
             raise FORBIDDEN
         return result
+
+    def authorizer_event(
+        self, version: str, match: RouteMatch, identity: list[str]
+    ) -> dict[str, Any]:
+        """The REQUEST authorizer's input, field for field as API Gateway sends it:
+        https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-lambda-authorizer.html
+        """
+        request = self.event(
+            version, match, self._request_headers(), list(self.query), None, False
+        )
+        # Authorizers receive no body
+        request.pop("body", None)
+        request.pop("isBase64Encoded", None)
+        route_arn = self._route_arn()
+        if version == "2.0":
+            return {
+                "version": "2.0",
+                "type": "REQUEST",
+                "routeArn": route_arn,
+                "identitySource": identity,
+                **{k: v for k, v in request.items() if k != "version"},
+            }
+        return {
+            "version": "1.0",
+            "type": "REQUEST",
+            "methodArn": route_arn,
+            "identitySource": ",".join(identity),
+            "authorizationToken": identity[0] if identity else None,
+            **{k: v for k, v in request.items() if k != "version"},
+        }
 
     def _policy_allows(self, statements: list[dict[str, Any]]) -> bool:
         route_arn = self._route_arn()

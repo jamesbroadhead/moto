@@ -124,7 +124,7 @@ class Authorizer(CloudFormationModel):
     ):
         self.id = "".join(random.choice(string.ascii_lowercase) for _ in range(8))
         self.auth_creds_arn = auth_creds_arn
-        self.auth_payload_format_version = auth_payload_format_version
+        self.auth_payload_format_version = _format_version(auth_payload_format_version)
         self.auth_result_ttl = auth_result_ttl
         self.authorizer_type = authorizer_type
         self.authorizer_uri = authorizer_uri
@@ -152,7 +152,7 @@ class Authorizer(CloudFormationModel):
         if auth_creds_arn is not None:
             self.auth_creds_arn = auth_creds_arn
         if auth_payload_format_version is not None:
-            self.auth_payload_format_version = auth_payload_format_version
+            self.auth_payload_format_version = _format_version(auth_payload_format_version)
         if auth_result_ttl is not None:
             self.auth_result_ttl = auth_result_ttl
         if authorizer_type is not None:
@@ -268,7 +268,7 @@ class Integration(CloudFormationModel):
         self.integration_subtype = integration_subtype
         self.integration_uri = integration_uri
         self.passthrough_behavior = passthrough_behavior
-        self.payload_format_version = payload_format_version
+        self.payload_format_version = _format_version(payload_format_version)
         self.request_parameters = request_parameters
         self.request_templates = request_templates
         self.response_parameters = response_parameters
@@ -385,7 +385,7 @@ class Integration(CloudFormationModel):
         if passthrough_behavior is not None:
             self.passthrough_behavior = passthrough_behavior
         if payload_format_version is not None:
-            self.payload_format_version = payload_format_version
+            self.payload_format_version = _format_version(payload_format_version)
         if integration_subtype is not None:
             self.integration_subtype = integration_subtype
         if request_parameters is not None:
@@ -2107,6 +2107,13 @@ class ApiGatewayV2Backend(BaseBackend):
 
 
 apigatewayv2_backends = BackendDict(ApiGatewayV2Backend, "apigatewayv2")
+
+
+def _format_version(value: Any) -> Any:
+    """CloudFormation reads an unquoted `PayloadFormatVersion: 2.0` as a number; the API's is a string."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value):.1f}"
+    return value
 
 
 def _camel_keys(value: Any) -> Any:
