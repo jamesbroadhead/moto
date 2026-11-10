@@ -158,6 +158,22 @@ def test_sqs_batches_records_and_deletes_them(endpoint):
 
 
 @mock_aws
+def test_sqs_delivers_a_message_as_soon_as_it_is_sent(endpoint, monkeypatch):
+    # Longer than the test waits: only a long poll delivers in time
+    monkeypatch.setattr(EventSourceMappingPoller, "POLL_INTERVAL", 30)
+    function_arn = create_function()
+    url, queue_arn = create_queue()
+    boto3.client("lambda", region_name=REGION).create_event_source_mapping(
+        EventSourceArn=queue_arn, FunctionName=function_arn
+    )
+    time.sleep(0.5)  # the poller finds the queue empty and waits
+    boto3.client("sqs", region_name=REGION).send_message(QueueUrl=url, MessageBody="x")
+
+    (record,) = wait_for(endpoint.records, timeout=3)
+    assert record["body"] == "x"
+
+
+@mock_aws
 def test_sqs_splits_into_batch_size(endpoint):
     function_arn = create_function()
     url, queue_arn = create_queue()

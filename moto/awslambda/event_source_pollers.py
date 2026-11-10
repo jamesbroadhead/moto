@@ -7,6 +7,7 @@ the function synchronously with a batch of records; the producer's call returns 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import threading
@@ -247,6 +248,8 @@ class EventSourceMappingPoller:
 
 
 class SqsPoller(EventSourceMappingPoller):
+    LONG_POLL_SECONDS = 1
+
     def __init__(self, esm: EventSourceMapping):
         super().__init__(esm)
         self.queue_name = esm.event_source_arn.split(":")[5]
@@ -271,6 +274,13 @@ class SqsPoller(EventSourceMappingPoller):
         body = _json_or_none(record["body"])
         return {**record, "body": body} if isinstance(body, (dict, list)) else record
 
+    @property
+    def long_polls(self) -> bool:
+        # Lambda long-polls, so a message is delivered as soon as it is sent. Not with a batching window, which
+        # receives for its whole length anyway, nor FIFO queues: moto's long poll spins while a visible message
+        # waits behind its group's in-flight messages.
+        return not self.fifo and not float(self.esm.max_batch_window or 0)
+
     def receive(self) -> list[Any]:
         queue = self.sqs.get_queue(self.queue_name)
         batch_size = self.esm.batch_size
@@ -278,10 +288,11 @@ class SqsPoller(EventSourceMappingPoller):
         deadline = time.monotonic() + window
         messages: list[Any] = []
         while True:
+            wait = self.LONG_POLL_SECONDS if self.long_polls else 0
             messages += self.sqs.receive_message(
                 self.queue_name,
                 batch_size - len(messages),
-                0,
+                wait,
                 queue.visibility_timeout,
                 message_attribute_names=["All"],
             )
@@ -298,9 +309,18 @@ class SqsPoller(EventSourceMappingPoller):
         except Exception:
             self.free.release()
             raise
-        if not messages:
+        if self.stopped.is_set():
+            # Stopped during a long poll: leave the messages to whatever reads the queue next
+            with contextlib.suppress(Exception):  # after a reset the queue is gone
+                for message in messages:
+                    self.sqs.change_message_visibility(
+                        self.queue_name, message.receipt_handle, 0
+                    )
             self.free.release()
             return False
+        if not messages:
+            self.free.release()
+            return self.long_polls  # a long poll has already waited
         future = self.pool.submit(self.handle, messages)
         future.add_done_callback(lambda _: self.free.release())
         return True
