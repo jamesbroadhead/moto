@@ -440,6 +440,48 @@ def test_dynamodb_stream_records_are_delivered_and_filtered(endpoint):
 
 
 @mock_aws
+def test_dynamodb_stream_records_carry_binary_values_as_base64(endpoint):
+    function_arn = create_function()
+    ddb = boto3.client("dynamodb", region_name=REGION)
+    stream_arn = ddb.create_table(
+        TableName="t",
+        KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+        StreamSpecification={"StreamEnabled": True, "StreamViewType": "NEW_IMAGE"},
+    )["TableDescription"]["LatestStreamArn"]
+    # A filter sees the record as the function would
+    pattern = {"dynamodb": {"NewImage": {"id": {"S": ["a"]}}}}
+    boto3.client("lambda", region_name=REGION).create_event_source_mapping(
+        EventSourceArn=stream_arn,
+        FunctionName=function_arn,
+        StartingPosition="TRIM_HORIZON",
+        FilterCriteria={"Filters": [{"Pattern": json.dumps(pattern)}]},
+    )
+    ddb.put_item(
+        TableName="t",
+        Item={
+            "id": {"S": "a"},
+            "b": {"B": b"\x00top"},
+            "bs": {"BS": [b"\x01one"]},
+            "m": {"M": {"nested": {"B": b"\x02map"}}},
+            "l": {"L": [{"B": b"\x03list"}]},
+        },
+    )
+
+    (record,) = wait_for(endpoint.records)
+    image = record["dynamodb"]["NewImage"]
+
+    def encoded(value: bytes) -> str:
+        return base64.b64encode(value).decode()
+
+    assert image["b"] == {"B": encoded(b"\x00top")}
+    assert image["bs"] == {"BS": [encoded(b"\x01one")]}
+    assert image["m"] == {"M": {"nested": {"B": encoded(b"\x02map")}}}
+    assert image["l"] == {"L": [{"B": encoded(b"\x03list")}]}
+
+
+@mock_aws
 def test_dynamodb_stream_retries_a_failed_batch(endpoint):
     function_arn = create_function()
     ddb = boto3.client("dynamodb", region_name=REGION)

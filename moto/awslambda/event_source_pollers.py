@@ -35,14 +35,13 @@ def dynamodb_stream_records(
     items: Iterable[Any], source: str, region: str
 ) -> list[dict[str, Any]]:
     """DynamoDB StreamRecords as Lambda delivers them."""
+    from moto.dynamodb.models.utilities import dynamo_json_dump
+
     records = []
     for item in items:
         record = item.to_json()
-        dynamodb = dict(record["dynamodb"])
-        if isinstance(dynamodb.get("ApproximateCreationDateTime"), datetime):
-            dynamodb["ApproximateCreationDateTime"] = unix_time(
-                dynamodb["ApproximateCreationDateTime"]
-            )
+        # Binary attributes, also those nested in maps and lists, are base64 text in the event
+        dynamodb = json.loads(dynamo_json_dump(record["dynamodb"]))
         records.append(
             {
                 "eventID": record["eventID"],
