@@ -145,19 +145,39 @@ def _extension_commands(layer_dirs: list[str]) -> list[str]:
     return [found[name] for name in sorted(found)]
 
 
+_opt_lock = threading.Lock()
+
+
 def _link_into_opt(opt: str, layer_dirs: list[str]) -> None:
-    """Lambda mounts the layers at /opt; here they share one directory, and the first layer to provide a path wins."""
-    for layer in layer_dirs:
-        for entry in Path(layer).iterdir():
-            target = Path(opt, entry.name)
-            if entry.is_dir() and target.is_dir() and not target.is_symlink():
-                _link_into_opt(str(target), [str(entry)])
-            elif not target.exists() and not target.is_symlink():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    target.symlink_to(entry)
-                except OSError:
-                    pass
+    """Lambda mounts the layers at /opt; here they share one directory, and the first layer to provide a file wins.
+
+    Directories that several layers provide, such as python/, are merged: a directory linked from one layer
+    becomes a real directory of links when another layer adds to it.
+    """
+    with _opt_lock:
+        for layer in layer_dirs:
+            _merge_into(Path(layer), Path(opt))
+
+
+def _merge_into(src: Path, dst: Path) -> None:
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in src.iterdir():
+        target = dst / entry.name
+        if not target.exists() and not target.is_symlink():
+            try:
+                target.symlink_to(entry)
+            except OSError:
+                pass
+        elif entry.is_dir() and target.is_dir():
+            if target.is_symlink():
+                linked = target.resolve()
+                if linked == entry.resolve():
+                    continue
+                target.unlink()
+                target.mkdir()
+                for existing in linked.iterdir():
+                    (target / existing.name).symlink_to(existing)
+            _merge_into(entry, target)
 
 
 def _fingerprint(fn: LambdaFunction) -> str:

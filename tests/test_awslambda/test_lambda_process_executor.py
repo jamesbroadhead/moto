@@ -534,3 +534,39 @@ def test_moto_settings_stay_out_of_the_function(client, tmp_path, monkeypatch):
         "AWS_ENDPOINT_URL": None,
         "MOTO_PORT": "5000",
     }
+
+
+def test_opt_dir_merges_the_layers_directories(client, tmp_path, monkeypatch):
+    opt = tmp_path / "opt"
+    monkeypatch.setenv("MOTO_LAMBDA_OPT_DIR", str(opt))
+    layers = []
+    for name, files in {
+        "first": {
+            "python/shared/a.py": "first",
+            "python/only_first.py": "",
+            "data.txt": "first",
+        },
+        "second": {
+            "python/shared/a.py": "second",
+            "python/shared/b.py": "",
+            "data.txt": "second",
+        },
+    }.items():
+        for path, content in files.items():
+            (tmp_path / name / path).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name / path).write_text(content)
+        layers.append(
+            client.publish_layer_version(
+                LayerName=name,
+                Content={"S3Bucket": LOCAL_CODE_BUCKET, "S3Key": str(tmp_path / name)},
+            )["LayerVersionArn"]
+        )
+    name = create(client, write_code(tmp_path / "code", HANDLER), Layers=layers[:1])
+    invoke(client, name)
+    other = create(client, write_code(tmp_path / "code2", HANDLER), Layers=layers[1:])
+    invoke(client, other)
+
+    assert (opt / "python" / "shared" / "a.py").read_text() == "first"
+    assert (opt / "python" / "shared" / "b.py").exists()
+    assert (opt / "python" / "only_first.py").exists()
+    assert (opt / "data.txt").read_text() == "first"
