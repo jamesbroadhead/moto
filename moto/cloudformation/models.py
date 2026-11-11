@@ -28,6 +28,7 @@ from .exceptions import (
     ValidationError,
 )
 from .parsing import Export, OutputMap, ResourceMap
+from .transforms import process_transforms
 from .utils import (
     generate_changeset_id,
     generate_stack_id,
@@ -424,6 +425,8 @@ class Stack(CloudFormationModel):
         self.name = name
         self.account_id = account_id
         self.template = template
+        self.parameters = parameters
+        self.region_name = region_name
         self.template_dict: dict[str, Any]
         if template != {}:
             self._parse_template()
@@ -431,8 +434,6 @@ class Stack(CloudFormationModel):
         else:
             self.template_dict = {}
             self.description = None
-        self.parameters = parameters
-        self.region_name = region_name
         self.notification_arns = notification_arns if notification_arns else []
         self.role_arn = role_arn
         self.tags = tags if tags else {}
@@ -454,8 +455,9 @@ class Stack(CloudFormationModel):
         self.disable_rollback = False
 
     def has_template(self, other_template: str) -> bool:
-        self._parse_template()
-        return self.template_dict == self.parse_template(other_template)
+        return self.parse_template(self.template) == self.parse_template(  # type: ignore[arg-type]
+            other_template
+        )
 
     def has_parameters(self, other_parameters: dict[str, Any]) -> bool:
         return self.parameters == other_parameters
@@ -498,7 +500,12 @@ class Stack(CloudFormationModel):
         self.events.append(event)
 
     def _parse_template(self) -> None:
-        self.template_dict = self.parse_template(self.template)  # type: ignore[arg-type]
+        self.template_dict = process_transforms(
+            self.parse_template(self.template),  # type: ignore[arg-type]
+            self.parameters,
+            self.account_id,
+            self.region_name,
+        )
 
     @staticmethod
     def parse_template(template: str) -> dict[str, Any]:  # type: ignore[misc]
@@ -527,7 +534,8 @@ class Stack(CloudFormationModel):
 
     @property
     def stack_resources(self) -> Iterable[type[CloudFormationModel]]:
-        return self.resource_map.values()
+        # Resources whose condition is false, or that moto cannot create, have no entry
+        return [r for r in self.resource_map.values() if r is not None]
 
     @property
     def outputs(self) -> list[dict[str, Any]] | None:
@@ -590,14 +598,14 @@ class Stack(CloudFormationModel):
             "UPDATE_IN_PROGRESS", resource_status_reason="User Initiated"
         )
         self.template = template
+        if parameters:
+            self.parameters = parameters
         self._parse_template()
         self.resource_map.update(self.template_dict, parameters)
         self.output_map = self._create_output_map()
         self._add_stack_event("UPDATE_COMPLETE")
         self.status = "UPDATE_COMPLETE"
         self.role_arn = role_arn
-        if parameters:
-            self.parameters = parameters
         # only overwrite tags if passed
         if tags is not None:
             self.tags = tags
@@ -737,6 +745,12 @@ class ChangeSet(BaseModel):
             self.template_dict = yaml.load(self.template, Loader=yaml.Loader)
         except (ParserError, ScannerError):
             self.template_dict = json.loads(self.template)
+        self.template_dict = process_transforms(
+            self.template_dict,
+            self.parameters,
+            self.stack.account_id,
+            self.stack.region_name,
+        )
 
     def diff(self) -> list[Change]:
         changes = []
