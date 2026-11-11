@@ -81,7 +81,11 @@ def test_serverless_transform_rejects_an_invalid_template():
         _create(template)
 
     assert exc.value.response["Error"]["Code"] == "ValidationError"
-    assert "Transform AWS::Serverless-2016-10-31 failed with" in str(exc.value)
+    message = exc.value.response["Error"]["Message"]
+    assert message.startswith(
+        "Transform AWS::Serverless-2016-10-31 failed with: Invalid Serverless Application"
+        " Specification document. Number of errors found: 1. Resource with id [Fn] is invalid."
+    )
 
 
 @mock_aws
