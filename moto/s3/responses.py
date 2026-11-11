@@ -8,6 +8,9 @@ from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 
 import xmltodict
+from botocore.auth import S3SigV4QueryAuth
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 
 from moto import settings
 from moto.core.common_types import TYPE_RESPONSE
@@ -72,6 +75,7 @@ from .exceptions import (
     ReplicationConfigurationNotFoundError,
     S3AclAndGrantError,
     S3ClientError,
+    S3SignatureDoesNotMatchError,
     ServerSideEncryptionConfigurationNotFoundError,
     VersioningNotEnabledForReplication,
 )
@@ -402,11 +406,70 @@ class S3Response(BaseResponse):
         bucket_name = self.parse_bucket_name_from_url(request, full_url)
         self.backend.log_incoming_request(request, bucket_name)
         try:
+            self._verify_presigned_url()
             response = self._bucket_response(request, full_url)
         except S3ClientError as s3error:
             response = self.serialized(ActionResult(s3error))
 
         return self._send_response(response)
+
+    def _verify_presigned_url(self) -> None:
+        """Recompute the SigV4 signature of a presigned URL, which covers the method, path, query and signed headers.
+
+        Opt-in with MOTO_S3_VERIFY_PRESIGNED_URLS. Requests signed with a key whose secret moto does not know pass.
+        """
+        secrets = settings.s3_presigned_url_secrets()
+        if secrets is None or "Authorization" in self.headers:
+            return
+        raw_query = self.normalized_request.query_string.decode()
+        params = parse_qs(raw_query, keep_blank_values=True)
+        if params.get("X-Amz-Algorithm") != ["AWS4-HMAC-SHA256"]:
+            return
+        scope = params.get("X-Amz-Credential", [""])[0].split("/")
+        if len(scope) != 5:
+            return
+        access_key_id, _, region, service, _ = scope
+        token = params.get("X-Amz-Security-Token", [None])[0]
+        secret = secrets.get(access_key_id)
+        if secret is None:
+            from moto.iam.access_control import (
+                CreateAccessKeyFailure,
+                create_access_key,
+            )
+
+            try:
+                secret = (
+                    create_access_key(
+                        account_id=self.current_account,
+                        partition=get_partition(region),
+                        access_key_id=access_key_id,
+                        headers={"X-Amz-Security-Token": token} if token else {},
+                    )
+                    .create_credentials()
+                    .secret_key
+                )
+            except CreateAccessKeyFailure:
+                return
+        signed_headers = params["X-Amz-SignedHeaders"][0].split(";")
+        unsigned_query = "&".join(
+            pair
+            for pair in raw_query.split("&")
+            if not pair.startswith("X-Amz-Signature=")
+        )
+        aws_request = AWSRequest(
+            method=self.method,
+            url=f"https://{self.headers.get('host', '')}{self.raw_path}?{unsigned_query}",
+            headers={name: self.headers.get(name, "") for name in signed_headers},
+        )
+        aws_request.context["timestamp"] = params["X-Amz-Date"][0]
+        auth = S3SigV4QueryAuth(
+            Credentials(access_key_id, secret, token), service, region
+        )
+        string_to_sign = auth.string_to_sign(
+            aws_request, auth.canonical_request(aws_request)
+        )
+        if auth.signature(string_to_sign, aws_request) != params["X-Amz-Signature"][0]:
+            raise S3SignatureDoesNotMatchError()
 
     @classmethod
     def _send_response(cls, response: TYPE_RESPONSE | str | bytes) -> TYPE_RESPONSE:  # type: ignore
@@ -1882,6 +1945,7 @@ class S3Response(BaseResponse):
         self.backend.log_incoming_request(request, bucket_name)
 
         try:
+            self._verify_presigned_url()
             response = self._key_response(request, full_url)
         except S3ClientError as s3error:
             response = self.serialized(ActionResult(s3error))
