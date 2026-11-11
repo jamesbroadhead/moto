@@ -570,3 +570,105 @@ def test_opt_dir_merges_the_layers_directories(client, tmp_path, monkeypatch):
     assert (opt / "python" / "shared" / "b.py").exists()
     assert (opt / "python" / "only_first.py").exists()
     assert (opt / "data.txt").read_text() == "first"
+
+
+LAMBDA_PATH = "/var/lang/bin:/usr/local/bin:/usr/bin/:/bin:/opt/bin"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_function_gets_the_lambda_execution_environment(
+    client, tmp_path, monkeypatch, runtime
+):
+    # Lambda's documented runtime variables, not the host's PATH or library path
+    monkeypatch.setenv("PATH", f"/host/bin{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/host/lib")
+    code = write_code(tmp_path / "code", ENV_HANDLER)
+    name = create(client, code, runtime, MemorySize=256)
+    names = [
+        "_HANDLER",
+        "AWS_EXECUTION_ENV",
+        "AWS_LAMBDA_FUNCTION_MEMORY_SIZE",
+        "AWS_LAMBDA_FUNCTION_NAME",
+        "AWS_LAMBDA_FUNCTION_VERSION",
+        "AWS_LAMBDA_INITIALIZATION_TYPE",
+        "AWS_LAMBDA_LOG_GROUP_NAME",
+        "AWS_XRAY_CONTEXT_MISSING",
+        "LAMBDA_RUNTIME_DIR",
+        "LAMBDA_TASK_ROOT",
+        "LANG",
+        "LD_LIBRARY_PATH",
+        "PATH",
+        "TZ",
+    ]
+
+    _, result = invoke(client, name, {"names": names + ["AWS_LAMBDA_LOG_STREAM_NAME"]})
+
+    task_root = result["LAMBDA_TASK_ROOT"]
+    assert Path(task_root, "app.py").read_text() == ENV_HANDLER
+    assert result["AWS_LAMBDA_LOG_STREAM_NAME"]
+    assert {k: result[k] for k in names} == {
+        "_HANDLER": "app.handler",
+        # Not defined for OS-only runtimes
+        "AWS_EXECUTION_ENV": None
+        if runtime.startswith("provided")
+        else f"AWS_Lambda_{runtime}",
+        "AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "256",
+        "AWS_LAMBDA_FUNCTION_NAME": name,
+        "AWS_LAMBDA_FUNCTION_VERSION": "$LATEST",
+        "AWS_LAMBDA_INITIALIZATION_TYPE": "on-demand",
+        "AWS_LAMBDA_LOG_GROUP_NAME": f"/aws/lambda/{name}",
+        "AWS_XRAY_CONTEXT_MISSING": "LOG_ERROR",
+        "LAMBDA_RUNTIME_DIR": "/var/runtime",
+        "LAMBDA_TASK_ROOT": task_root,
+        "LANG": "en_US.UTF-8",
+        "LD_LIBRARY_PATH": "/var/lang/lib:/lib64:/usr/lib64:/var/runtime:/var/runtime/lib"
+        f":{task_root}:{task_root}/lib:/opt/lib",
+        "PATH": LAMBDA_PATH,
+        "TZ": ":UTC",
+    }
+
+
+def test_layers_bin_and_lib_directories_follow_opt(client, tmp_path):
+    layer = tmp_path / "layer"
+    (layer / "bin").mkdir(parents=True)
+    (layer / "lib").mkdir()
+    arn = client.publish_layer_version(
+        LayerName="tools",
+        Content={"S3Bucket": LOCAL_CODE_BUCKET, "S3Key": str(layer)},
+    )["LayerVersionArn"]
+    name = create(client, write_code(tmp_path / "code", ENV_HANDLER), Layers=[arn])
+
+    _, result = invoke(client, name, {"names": ["PATH", "LD_LIBRARY_PATH"]})
+
+    assert result["PATH"] == f"{LAMBDA_PATH}:{layer}/bin"
+    assert result["LD_LIBRARY_PATH"].endswith(f":/opt/lib:{layer}/lib")
+
+
+def test_opt_dir_takes_the_place_of_opt(client, tmp_path, monkeypatch):
+    opt = tmp_path / "opt"
+    monkeypatch.setenv("MOTO_LAMBDA_OPT_DIR", str(opt))
+    layer = tmp_path / "layer"
+    (layer / "python").mkdir(parents=True)
+    (layer / "python" / "greeting.py").write_text("def greet():\n    return 'opt'\n")
+    arn = client.publish_layer_version(
+        LayerName="tools",
+        Content={"S3Bucket": LOCAL_CODE_BUCKET, "S3Key": str(layer)},
+    )["LayerVersionArn"]
+    name = create(client, write_code(tmp_path / "code", ENV_HANDLER), Layers=[arn])
+
+    _, result = invoke(client, name, {"names": ["PATH", "LD_LIBRARY_PATH"]})
+
+    assert result["PATH"] == f"{LAMBDA_PATH}:{opt}/bin"
+    assert result["LD_LIBRARY_PATH"].endswith(f":/opt/lib:{opt}/lib")
+
+
+def test_function_configuration_overrides_unreserved_variables(client, tmp_path):
+    name = create(
+        client,
+        write_code(tmp_path / "code", ENV_HANDLER),
+        Environment={"Variables": {"PATH": "/custom/bin", "TZ": "Europe/Berlin"}},
+    )
+
+    _, result = invoke(client, name, {"names": ["PATH", "TZ"]})
+
+    assert result == {"PATH": "/custom/bin", "TZ": "Europe/Berlin"}

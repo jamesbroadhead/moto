@@ -219,7 +219,8 @@ def lambda_layer_paths() -> dict[str, str]:
 
 def lambda_opt_dir() -> str | None:
     """MOTO_LAMBDA_OPT_DIR: a directory, typically /opt, into which the process executor links the
-    contents of each function's layers (first layer to provide a path wins), for code that reads /opt."""
+    contents of each function's layers (first layer to provide a path wins), for code that reads /opt. Its bin and
+    lib directories take the place of each layer's on the functions' PATH and LD_LIBRARY_PATH."""
     return os.environ.get("MOTO_LAMBDA_OPT_DIR") or None
 
 

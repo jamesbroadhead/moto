@@ -45,6 +45,9 @@ INIT_TIMEOUT = 10.0
 LOG_TAIL_BYTES = 4096
 RUNTIME_CLIENT = str(Path(__file__).with_name("runtime_client.py"))
 LAMBDA_BASE_IMAGE_BOOTSTRAP = "/var/runtime/bootstrap"
+LAMBDA_RUNTIME_DIR = "/var/runtime"
+# The PATH of Lambda's managed runtimes; /opt/bin holds the layers' executables
+LAMBDA_PATH = ["/var/lang/bin", "/usr/local/bin", "/usr/bin/", "/bin", "/opt/bin"]
 
 
 @dataclass
@@ -693,35 +696,69 @@ class FunctionPool:
             endpoint_url = f"{host}:{port}"
         if endpoint_url:
             env.setdefault("AWS_ENDPOINT_URL", endpoint_url)
+        # Lambda mounts the layers at /opt; without MOTO_LAMBDA_OPT_DIR each layer stays in its own directory.
+        opt = settings.lambda_opt_dir()
+        if opt:
+            layer_roots = [] if opt == "/opt" else [opt]
+        else:
+            layer_roots = spec.layer_dirs
         python_paths = [spec.code_dir]
-        bin_paths = []
         for layer in spec.layer_dirs:
-            python_paths.append(os.path.join(layer, "python"))
             python_paths += sorted(
                 glob.glob(
                     os.path.join(layer, "python", "lib", "python3*", "site-packages")
                 )
             )
-            bin_paths.append(os.path.join(layer, "bin"))
+            python_paths.append(os.path.join(layer, "python"))
         if spec.environment.get("PYTHONPATH"):
             python_paths.append(spec.environment["PYTHONPATH"])
+        # Unreserved variables, which the function's configuration can override
+        env.update(
+            {
+                "LANG": "en_US.UTF-8",
+                "PATH": os.pathsep.join(
+                    [
+                        *LAMBDA_PATH,
+                        *(os.path.join(root, "bin") for root in layer_roots),
+                    ]
+                ),
+                "LD_LIBRARY_PATH": os.pathsep.join(
+                    [
+                        "/var/lang/lib",
+                        "/lib64",
+                        "/usr/lib64",
+                        LAMBDA_RUNTIME_DIR,
+                        f"{LAMBDA_RUNTIME_DIR}/lib",
+                        spec.code_dir,
+                        os.path.join(spec.code_dir, "lib"),
+                        "/opt/lib",
+                        *(os.path.join(root, "lib") for root in layer_roots),
+                    ]
+                ),
+                "AWS_XRAY_CONTEXT_MISSING": "LOG_ERROR",
+                "TZ": ":UTC",
+            }
+        )
         env.update(spec.environment)
+        env.pop("AWS_EXECUTION_ENV", None)
+        if spec.runtime and not spec.runtime.startswith("provided"):
+            env["AWS_EXECUTION_ENV"] = f"AWS_Lambda_{spec.runtime}"
+        env.setdefault("AWS_ACCESS_KEY", env["AWS_ACCESS_KEY_ID"])
         env.update(
             {
                 "_HANDLER": spec.handler,
                 "AWS_REGION": spec.region,
                 "AWS_DEFAULT_REGION": spec.region,
-                "AWS_EXECUTION_ENV": f"AWS_Lambda_{spec.runtime}",
                 "AWS_LAMBDA_FUNCTION_NAME": spec.name,
                 "AWS_LAMBDA_FUNCTION_MEMORY_SIZE": str(spec.memory),
                 "AWS_LAMBDA_FUNCTION_VERSION": spec.version,
                 "AWS_LAMBDA_INITIALIZATION_TYPE": "on-demand",
                 "AWS_LAMBDA_LOG_GROUP_NAME": f"/aws/lambda/{spec.name}",
+                "LAMBDA_RUNTIME_DIR": LAMBDA_RUNTIME_DIR,
                 "LAMBDA_TASK_ROOT": spec.code_dir,
-                "PATH": os.pathsep.join([*bin_paths, os.environ.get("PATH", "")]),
+                # Lambda's Python bootstrap puts /opt/python on sys.path; here the layers' own directories
                 "PYTHONPATH": os.pathsep.join(python_paths),
                 "PYTHONUNBUFFERED": "1",
-                "TZ": ":UTC",
             }
         )
         return env
