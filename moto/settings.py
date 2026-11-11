@@ -65,6 +65,16 @@ def get_s3_custom_endpoints() -> list[str]:
     return []
 
 
+def s3_presigned_url_secrets() -> dict[str, str] | None:
+    """MOTO_S3_VERIFY_PRESIGNED_URLS: S3 verifies SigV4 presigned URLs when set.
+
+    The value is a JSON object of access key IDs to secret access keys that moto did not issue itself, such as
+    static credentials of the clients; `{}` verifies only keys that IAM or STS in moto issued.
+    """
+    secrets = os.environ.get("MOTO_S3_VERIFY_PRESIGNED_URLS")
+    return json.loads(secrets) if secrets is not None else None
+
+
 S3_UPLOAD_PART_MIN_SIZE = int(os.environ.get("S3_UPLOAD_PART_MIN_SIZE", "5242880"))
 
 
