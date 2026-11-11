@@ -534,7 +534,8 @@ class Stack(CloudFormationModel):
 
     @property
     def stack_resources(self) -> Iterable[type[CloudFormationModel]]:
-        return self.resource_map.values()
+        # Resources whose condition is false, or that moto cannot create, have no entry
+        return [r for r in self.resource_map.values() if r is not None]
 
     @property
     def outputs(self) -> list[dict[str, Any]] | None:

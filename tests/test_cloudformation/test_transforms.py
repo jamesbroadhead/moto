@@ -133,6 +133,8 @@ def test_language_extensions_resolve_find_in_map_defaults_and_conditions_before_
     resources = _resources(cf)
     assert "FnAliasdev" in resources
     assert "Topic" not in resources and "Queue" in resources
+    # A resource whose condition is false is not part of the stack
+    assert "" not in resources
     config = boto3.client("lambda", region_name=REGION).get_function_configuration(
         FunctionName="le-fn"
     )
