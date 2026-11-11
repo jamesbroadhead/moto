@@ -770,7 +770,7 @@ class ResourceMap(collections_abc.Mapping):  # type: ignore[type-arg]
                     # This Output is not shown - no point in validating it
                     continue
             value = value.get("Value", {})
-            if "Fn::GetAtt" in value:
+            if isinstance(value, dict) and "Fn::GetAtt" in value:
                 resource_name = value["Fn::GetAtt"][0]
                 resource = self._resource_json_map.get(resource_name)
                 # validate resource will be created
