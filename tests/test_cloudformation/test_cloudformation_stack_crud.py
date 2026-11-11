@@ -3020,3 +3020,24 @@ def test_update_missing_stack_instance_raises_exception():
     assert error["Code"] == "StackInstanceNotFoundException"
     metadata = exc.value.response["ResponseMetadata"]
     assert metadata["HTTPStatusCode"] == 404
+
+
+@mock_aws
+def test_create_stack_with_scalar_output_values():
+    # CloudFormation accepts numbers and booleans as Output values, and returns them as strings
+    template = {
+        "Resources": {"Queue": {"Type": "AWS::SQS::Queue"}},
+        "Outputs": {
+            "Timeout": {"Value": 30},
+            "Enabled": {"Value": True},
+            "QueueArn": {"Value": {"Fn::GetAtt": ["Queue", "Arn"]}},
+        },
+    }
+    cf = boto3.client("cloudformation", region_name="us-east-1")
+    cf.create_stack(StackName="scalars", TemplateBody=json.dumps(template))
+
+    outputs = cf.describe_stacks(StackName="scalars")["Stacks"][0]["Outputs"]
+    values = {o["OutputKey"]: o["OutputValue"] for o in outputs}
+    assert values["Timeout"] == "30"
+    assert values["Enabled"] in ("true", "True")
+    assert values["QueueArn"].startswith("arn:aws:sqs:")
