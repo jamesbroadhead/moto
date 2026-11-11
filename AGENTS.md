@@ -29,9 +29,12 @@ read its `README.md` and `AGENTS.md`). Agents maintain it; people review. Everyt
 
 ## Working with the box
 
-Agents develop moto and the e2e specs together. When a spec fails in the box because moto lacks something AWS
-does, fix it here, with a test, in the same piece of work, rather than working around it in `tests/box/`. The
-test for whether it belongs here: would AWS do this for every customer?
+All AWS behaviour the box needs lives in this fork, with no exceptions. taktile-services holds none: `tests/box/`
+only wires moto up, routes hosts, manages processes, seeds data and builds and deploys. Agents develop moto and
+the e2e specs together. When a spec needs AWS behaviour that moto lacks, add it here in the same piece of work,
+following "Making a change": the test first, an implementation as upstream would write it, a `MOTO_*` opt-in only
+for behaviour that differs from what AWS or upstream moto does by default or that only the box wants, the
+`upstream-pr-template` issue, the tag and the `MOTO_COMMIT` bump. Never work around it in `tests/box/`.
 
 ## Syncing with upstream
 
