@@ -18,7 +18,7 @@ bedrock-runtime
 
 - [ ] apply_guardrail
 - [X] converse
-- [ ] converse_stream
+- [X] converse_stream
 - [ ] count_tokens
 - [ ] get_async_invoke
 - [ ] invoke_guardrail_checks

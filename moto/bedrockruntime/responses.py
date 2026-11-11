@@ -24,9 +24,19 @@ class BedrockRuntimeResponse(BaseResponse):
     def converse(self) -> ActionResult:
         return ActionResult(
             self.bedrockruntime_backend.converse(
-                self._get_param("modelId"), self._get_params()
+                self._get_param("modelId"), self._get_params(), self._request_body()
             )
         )
+
+    def converse_stream(self) -> ActionResult:
+        events = self.bedrockruntime_backend.converse_stream(
+            self._get_param("modelId"), self._get_params(), self._request_body()
+        )
+        return ActionResult({"stream": events})
+
+    def _request_body(self) -> dict[str, Any]:
+        """The request as AWS documents it, for a responder to read."""
+        return json.loads(self.body) if self.body else {}
 
     def invoke_model(self) -> ActionResult:
         payload = self._get_param("body")

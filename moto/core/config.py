@@ -1,5 +1,6 @@
 import re
-from typing import TypedDict
+from collections.abc import Callable
+from typing import Any, TypedDict
 
 
 class _docker_config(TypedDict, total=False):
@@ -30,6 +31,11 @@ class _iot_config(TypedDict, total=False):
     use_valid_cert: bool
 
 
+class _bedrock_runtime_config(TypedDict, total=False):
+    # A URL (ServerMode) or a function that answers Converse and ConverseStream requests
+    converse_responder: str | Callable[[dict[str, Any]], dict[str, Any]] | None
+
+
 DefaultConfig = TypedDict(
     "DefaultConfig",
     {
@@ -39,6 +45,7 @@ DefaultConfig = TypedDict(
         "iam": _iam_config,
         "stepfunctions": _sfn_config,
         "iot": _iot_config,
+        "bedrock-runtime": _bedrock_runtime_config,
     },
     total=False,
 )
@@ -55,6 +62,7 @@ default_user_config: DefaultConfig = {
     "iam": {"load_aws_managed_policies": False},
     "stepfunctions": {"execute_state_machine": False},
     "iot": {"use_valid_cert": False},
+    "bedrock-runtime": {"converse_responder": None},
 }
 
 

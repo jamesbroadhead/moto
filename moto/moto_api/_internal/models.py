@@ -177,6 +177,11 @@ class MotoAPIBackend(BaseBackend):
         return {
             "batch": default_user_config["batch"],
             "lambda": default_user_config["lambda"],
+            "bedrock-runtime": {
+                k: v
+                for k, v in default_user_config.get("bedrock-runtime", {}).items()
+                if not callable(v)
+            },
         }
 
     def set_config(self, config: dict[str, Any]) -> None:
@@ -186,6 +191,8 @@ class MotoAPIBackend(BaseBackend):
             default_user_config["lambda"] = config["lambda"]
         if "stepfunctions" in config:
             default_user_config["stepfunctions"] = config["stepfunctions"]
+        if "bedrock-runtime" in config:
+            default_user_config["bedrock-runtime"] = config["bedrock-runtime"]
 
 
 moto_api_backend = MotoAPIBackend(region_name="global", account_id=DEFAULT_ACCOUNT_ID)
