@@ -305,6 +305,8 @@ def _serverless(
             get_managed_policy_map=managed_policies,
         )
     except InvalidDocumentException as e:
+        # CloudFormation appends each cause to the summary, which only counts them
+        causes = " ".join(cause.message for cause in e.causes)
         raise ValidationError(
-            message=f"Transform {SERVERLESS} failed with: {e.message}"
+            message=f"Transform {SERVERLESS} failed with: {e.message} {causes}"
         )
