@@ -144,17 +144,26 @@ def clean_json(resource_json: Any, resources_map: "ResourceMap") -> Any:
                 return resource
 
         if "Fn::FindInMap" in resource_json:
-            map_name = resource_json["Fn::FindInMap"][0]
-            map_path = resource_json["Fn::FindInMap"][1:]
+            map_name = clean_json(resource_json["Fn::FindInMap"][0], resources_map)
+            map_path = resource_json["Fn::FindInMap"][1:3]
+            # AWS::LanguageExtensions: [map, key, key, {"DefaultValue": value}]
+            options = resource_json["Fn::FindInMap"][3:4] or [{}]
             mappings = getattr(resources_map, "mappings", {})
-            result = (
-                mappings[map_name] if map_name in mappings else resources_map[map_name]
-            )
-            for path in map_path:
-                if "Fn::Transform" in result:  # type: ignore[operator]
-                    result = resources_map[clean_json(path, resources_map)]
-                else:
-                    result = result[clean_json(path, resources_map)]  # type: ignore[index]
+            try:
+                result = (
+                    mappings[map_name]
+                    if map_name in mappings
+                    else resources_map[map_name]
+                )
+                for path in map_path:
+                    if "Fn::Transform" in result:  # type: ignore[operator]
+                        result = resources_map[clean_json(path, resources_map)]
+                    else:
+                        result = result[clean_json(path, resources_map)]  # type: ignore[index]
+            except KeyError:
+                if "DefaultValue" not in options[0]:
+                    raise
+                return clean_json(options[0]["DefaultValue"], resources_map)
             return result
 
         if "Fn::GetAtt" in resource_json:
