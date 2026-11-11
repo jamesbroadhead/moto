@@ -131,22 +131,33 @@ class BedrockAgentCoreBackend(BaseBackend):
         payload: bytes,
         headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes]:
-        """Forwards the invocation to MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT, which runs the runtime's code.
+        """Runs the invocation on the runtime's code, which MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT or
+        MOTO_BEDROCK_AGENTCORE_EXECUTOR=process provides. Without either, this is not implemented.
 
-        Returns the runtime's status, content type and body. Without the setting, this is not implemented.
+        Returns the runtime's status, content type and body.
         """
         from moto.bedrockagentcorecontrol.models import bedrockagentcorecontrol_backends
 
         control = bedrockagentcorecontrol_backends[self.account_id][self.region_name]
-        if not any(
-            runtime.agent_runtime_arn == agent_runtime_arn
-            for runtime in control.agent_runtimes.values()
-        ):
+        runtime = next(
+            (
+                r
+                for r in control.agent_runtimes.values()
+                if r.agent_runtime_arn == agent_runtime_arn
+            ),
+            None,
+        )
+        if runtime is None:
             raise ResourceNotFoundException(f"Runtime {agent_runtime_arn} not found")
         endpoint = settings.bedrock_agentcore_invoke_endpoint()
         if endpoint is None:
+            if settings.bedrock_agentcore_executor() == "process":
+                from . import executor
+
+                return executor.invoke(runtime, payload, headers)
             raise NotImplementedError(
-                "InvokeAgentRuntime needs MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT to run the runtime"
+                "InvokeAgentRuntime needs MOTO_BEDROCK_AGENTCORE_EXECUTOR=process or "
+                "MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT to run the runtime"
             )
         import requests
 
