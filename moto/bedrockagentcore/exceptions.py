@@ -13,3 +13,7 @@ class ResourceNotFoundException(BedrockAgentCoreClientError):
 
 class ValidationException(BedrockAgentCoreClientError):
     code = "ValidationException"
+
+
+class RuntimeClientError(BedrockAgentCoreClientError):
+    code = "RuntimeClientError"

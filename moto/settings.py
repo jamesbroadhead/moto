@@ -143,6 +143,34 @@ def bedrock_agentcore_invoke_endpoint() -> str | None:
     return os.environ.get("MOTO_BEDROCK_AGENTCORE_INVOKE_ENDPOINT") or None
 
 
+def bedrock_agentcore_executor() -> str | None:
+    """MOTO_BEDROCK_AGENTCORE_EXECUTOR: "process" runs each runtime's code as a local process that serves the
+    AgentCore runtime contract (/ping, /invocations on port 8080, mapped to a free local port).
+    Code in MOTO_LAMBDA_LOCAL_CODE_BUCKET is read in place."""
+    return (os.environ.get("MOTO_BEDROCK_AGENTCORE_EXECUTOR") or "").lower() or None
+
+
+def bedrock_agentcore_runtime_commands() -> dict[str, list[str]]:
+    """MOTO_BEDROCK_AGENTCORE_RUNTIME_COMMANDS: JSON mapping runtime patterns (fnmatch) to the Python that runs
+    the entry point, as a list or a shell-style string, e.g. {"PYTHON_3_13": "/usr/bin/python3.13"}.
+    Default: moto's own Python."""
+    import shlex
+
+    commands = json.loads(
+        os.environ.get("MOTO_BEDROCK_AGENTCORE_RUNTIME_COMMANDS") or "{}"
+    )
+    return {
+        pattern: shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
+        for pattern, cmd in commands.items()
+    }
+
+
+def bedrock_agentcore_aws_endpoint_url() -> str | None:
+    """MOTO_BEDROCK_AGENTCORE_AWS_ENDPOINT_URL: the AWS_ENDPOINT_URL the process executor gives runtimes.
+    Unset: Moto's own URL. Empty: none, for hosts that route AWS host names to Moto themselves."""
+    return os.environ.get("MOTO_BEDROCK_AGENTCORE_AWS_ENDPOINT_URL")
+
+
 def lambda_event_source_mappings_disabled() -> bool:
     """Leave event source mappings to an external poller: moto then does not invoke functions for them."""
     return (
